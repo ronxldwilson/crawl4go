@@ -79,6 +79,8 @@ type CrawlResponse struct {
 	Metadata     *content.PageMetadata    `json:"metadata,omitempty"`
 	Tables       []content.ExtractedTable `json:"tables,omitempty"`
 	Media        *content.MediaSet        `json:"media,omitempty"`
+	Readability  *content.ReadabilityScore `json:"readability,omitempty"`
+	ContentHash  string                   `json:"content_hash,omitempty"`
 	RenderTimeMs int64                    `json:"render_time_ms"`
 	RenderSource string                   `json:"render_source"`
 }
@@ -329,6 +331,10 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *browser.CDPClie
 		pageContent = content.HTMLToMarkdown(pageContent, req.URL)
 	}
 
+	plainText := content.HTMLToText(htmlContent)
+	readability := content.ScoreReadability(plainText)
+	hash := content.ContentHash(pageContent)
+
 	return CrawlResponse{
 		URL:          req.URL,
 		StatusCode:   statusCode,
@@ -339,6 +345,8 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *browser.CDPClie
 		Metadata:     metadata,
 		Tables:       tables,
 		Media:        media,
+		Readability:  &readability,
+		ContentHash:  hash,
 		RenderTimeMs: time.Since(start).Milliseconds(),
 		RenderSource: source,
 	}
