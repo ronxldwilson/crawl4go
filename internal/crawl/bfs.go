@@ -19,17 +19,32 @@ func (s *BFSStrategy) Run(ctx context.Context, startURL string, crawlFn CrawlFun
 	baseU, _ := url.Parse(startURL)
 	normalizedStart := content.NormalizeURL(startURL, baseU)
 
-	visited[normalizedStart] = true
-	depths[normalizedStart] = 0
-
 	type queueItem struct {
 		url       string
 		parentURL string
 	}
 
-	currentLevel := []queueItem{{url: startURL, parentURL: ""}}
+	var currentLevel []queueItem
 	var allResults []DeepCrawlResult
 	stats := CrawlStats{}
+
+	if opts.InitialState != nil {
+		for u, v := range opts.InitialState.Visited {
+			visited[u] = v
+		}
+		for u, d := range opts.InitialState.Depths {
+			depths[u] = d
+		}
+		for _, u := range opts.InitialState.Pending {
+			currentLevel = append(currentLevel, queueItem{url: u, parentURL: ""})
+		}
+	}
+
+	if len(currentLevel) == 0 {
+		visited[normalizedStart] = true
+		depths[normalizedStart] = 0
+		currentLevel = []queueItem{{url: startURL, parentURL: ""}}
+	}
 
 	for depth := 0; depth <= opts.MaxDepth && len(currentLevel) > 0; depth++ {
 		if ctx.Err() != nil {

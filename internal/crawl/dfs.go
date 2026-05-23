@@ -18,18 +18,34 @@ func (s *DFSStrategy) Run(ctx context.Context, startURL string, crawlFn CrawlFun
 	baseU, _ := url.Parse(startURL)
 	normalizedStart := content.NormalizeURL(startURL, baseU)
 
-	visited[normalizedStart] = true
-	depths[normalizedStart] = 0
-
 	type stackItem struct {
 		url       string
 		parentURL string
 		depth     int
 	}
 
-	stack := []stackItem{{url: startURL, parentURL: "", depth: 0}}
+	var stack []stackItem
 	var allResults []DeepCrawlResult
 	stats := CrawlStats{}
+
+	if opts.InitialState != nil {
+		for u, v := range opts.InitialState.Visited {
+			visited[u] = v
+		}
+		for u, d := range opts.InitialState.Depths {
+			depths[u] = d
+		}
+		for _, u := range opts.InitialState.Pending {
+			d := depths[u]
+			stack = append(stack, stackItem{url: u, parentURL: "", depth: d})
+		}
+	}
+
+	if len(stack) == 0 {
+		visited[normalizedStart] = true
+		depths[normalizedStart] = 0
+		stack = []stackItem{{url: startURL, parentURL: "", depth: 0}}
+	}
 
 	for len(stack) > 0 && stats.PagesCrawled < opts.MaxPages {
 		if ctx.Err() != nil {

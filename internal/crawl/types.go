@@ -20,6 +20,7 @@ type CrawlOptions struct {
 	Scorer          URLScorer
 	ScoreThreshold  float64
 	Robots          *RobotsChecker
+	InitialState    *CrawlState
 }
 
 type DeepCrawlResult struct {

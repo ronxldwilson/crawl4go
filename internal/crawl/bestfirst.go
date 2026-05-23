@@ -43,20 +43,38 @@ func (s *BestFirstStrategy) Run(ctx context.Context, startURL string, crawlFn Cr
 	baseU, _ := url.Parse(startURL)
 	normalizedStart := content.NormalizeURL(startURL, baseU)
 
-	visited[normalizedStart] = true
-	depths[normalizedStart] = 0
-
 	pq := &priorityQueue{}
 	heap.Init(pq)
 
-	initScore := 0.0
-	if opts.Scorer != nil {
-		initScore = opts.Scorer.Score(startURL)
-	}
-	heap.Push(pq, pqItem{url: startURL, parentURL: "", score: initScore, depth: 0})
-
 	var allResults []DeepCrawlResult
 	stats := CrawlStats{}
+
+	if opts.InitialState != nil {
+		for u, v := range opts.InitialState.Visited {
+			visited[u] = v
+		}
+		for u, d := range opts.InitialState.Depths {
+			depths[u] = d
+		}
+		for _, u := range opts.InitialState.Pending {
+			score := 0.0
+			if opts.InitialState.Scores != nil {
+				score = opts.InitialState.Scores[u]
+			}
+			d := depths[u]
+			heap.Push(pq, pqItem{url: u, parentURL: "", score: score, depth: d})
+		}
+	}
+
+	if pq.Len() == 0 {
+		visited[normalizedStart] = true
+		depths[normalizedStart] = 0
+		initScore := 0.0
+		if opts.Scorer != nil {
+			initScore = opts.Scorer.Score(startURL)
+		}
+		heap.Push(pq, pqItem{url: startURL, parentURL: "", score: initScore, depth: 0})
+	}
 
 	for pq.Len() > 0 && stats.PagesCrawled < opts.MaxPages {
 		if ctx.Err() != nil {
