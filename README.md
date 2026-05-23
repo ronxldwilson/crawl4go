@@ -202,4 +202,6 @@ crawl4go is designed to work alongside:
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE).
+
+This project is a derivative work of [Crawl4AI](https://github.com/unclecode/crawl4ai) by UncleCode.
