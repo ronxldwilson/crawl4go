@@ -210,6 +210,8 @@ func main() {
 	mux.HandleFunc("/diff", diffHandler())
 	mux.HandleFunc("/cdx", cdxHandler(httpClient))
 	mux.HandleFunc("/robots", robotsHandler(robots))
+	mux.HandleFunc("/analyze", analyzeHandler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/perf", perfHandler(cfg, cdpClient))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
 
 	slog.Info("crawl4go starting",
@@ -1045,6 +1047,103 @@ func loggingMiddleware(next http.Handler) http.Handler {
 			"remote", r.RemoteAddr,
 		)
 	})
+}
+
+func analyzeHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req struct {
+			URL    string `json:"url"`
+			WaitMs int    `json:"wait_ms"`
+			Proxy  bool   `json:"proxy"`
+			TopN   int    `json:"top_n"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.TopN <= 0 {
+			req.TopN = 20
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		plainText := content.HTMLToText(htmlContent)
+		structure := content.AnalyzeStructure(htmlContent)
+		stats := content.AnalyzeContent(plainText, req.TopN)
+		readability := content.ScoreReadability(plainText)
+		lang := content.DetectLanguage(plainText)
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":         req.URL,
+			"structure":   structure,
+			"stats":       stats,
+			"readability": readability,
+			"language":    lang,
+		})
+	}
+}
+
+func perfHandler(cfg Config, cdpClient *browser.CDPClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req struct {
+			URL    string `json:"url"`
+			WaitMs int    `json:"wait_ms"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		metrics, err := cdpClient.CollectMetrics(ctx, req.URL, req.WaitMs)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "metrics collection failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":     req.URL,
+			"metrics": metrics,
+		})
+	}
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
