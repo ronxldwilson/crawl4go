@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ronxldwilson/crawl4go/internal/browser"
@@ -119,6 +121,25 @@ type SitemapRequest struct {
 	MaxURLs int    `json:"max_urls"`
 }
 
+type ChunkRequest struct {
+	URL      string `json:"url"`
+	Strategy string `json:"strategy"`
+	ChunkSize int   `json:"chunk_size"`
+	Overlap   int   `json:"overlap"`
+	WaitMs    int   `json:"wait_ms"`
+	Prune     bool  `json:"prune"`
+	Proxy     bool  `json:"proxy"`
+}
+
+type BM25Request struct {
+	URL       string  `json:"url"`
+	Query     string  `json:"query"`
+	Threshold float64 `json:"threshold"`
+	WaitMs    int     `json:"wait_ms"`
+	Prune     bool    `json:"prune"`
+	Proxy     bool    `json:"proxy"`
+}
+
 func main() {
 	cfg := loadConfig()
 
@@ -136,6 +157,8 @@ func main() {
 	mux.HandleFunc("/link-preview", linkPreviewHandler(httpClient))
 	mux.HandleFunc("/sitemap", sitemapHandler(httpClient))
 	mux.HandleFunc("/cert/", certHandler())
+	mux.HandleFunc("/chunk", chunkHandler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/bm25", bm25Handler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
 
 	slog.Info("crawl4go starting",
@@ -145,7 +168,25 @@ func main() {
 		"max_concurrent", cfg.MaxConcurrent,
 	)
 
-	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
+	srv := &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      corsMiddleware(mux),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 15 * time.Minute,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		slog.Info("shutting down")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}()
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -286,7 +327,8 @@ func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http
 			req.Output = "markdown"
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		deepTimeout := 10 * time.Minute
+		ctx, cancel := context.WithTimeout(r.Context(), deepTimeout)
 		defer cancel()
 
 		var filters *crawl.FilterChain
@@ -499,6 +541,140 @@ func certHandler() http.HandlerFunc {
 	}
 }
 
+func chunkHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req ChunkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.ChunkSize <= 0 {
+			req.ChunkSize = 4000
+		}
+		if req.Strategy == "" {
+			req.Strategy = "fixed"
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		pageContent := htmlContent
+		if req.Prune {
+			if pruned, err := pruner.Filter(htmlContent); err == nil && len(pruned) > 0 {
+				pageContent = pruned
+			}
+		}
+		pageContent = content.HTMLToMarkdown(pageContent, req.URL)
+
+		var chunker content.ChunkStrategy
+		switch req.Strategy {
+		case "sliding":
+			chunker = content.NewSlidingWindowChunker(req.ChunkSize, req.Overlap)
+		case "semantic":
+			chunker = content.NewSemanticChunker(req.ChunkSize)
+		case "markdown":
+			chunker = content.NewMarkdownChunker(req.ChunkSize)
+		default:
+			chunker = content.NewFixedSizeChunker(req.ChunkSize, req.Overlap)
+		}
+
+		chunks := chunker.Chunk(pageContent)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":         req.URL,
+			"strategy":    req.Strategy,
+			"chunk_count": len(chunks),
+			"chunks":      chunks,
+		})
+	}
+}
+
+func bm25Handler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req BM25Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Threshold <= 0 {
+			req.Threshold = 1.0
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		if req.Prune {
+			if pruned, err := pruner.Filter(htmlContent); err == nil && len(pruned) > 0 {
+				htmlContent = pruned
+			}
+		}
+
+		chunks := content.ExtractTextChunks(htmlContent)
+
+		query := req.Query
+		if query == "" {
+			query = content.ExtractPageQuery(htmlContent)
+		}
+
+		bm25 := content.NewBM25Filter()
+		bm25.Threshold = req.Threshold
+		relevant := bm25.FilterByRelevance(chunks, query)
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":          req.URL,
+			"query":        query,
+			"total_chunks": len(chunks),
+			"relevant":     len(relevant),
+			"chunks":       relevant,
+		})
+	}
+}
+
 func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -510,6 +686,19 @@ func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, status)
 	}
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
