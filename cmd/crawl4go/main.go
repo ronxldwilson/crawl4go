@@ -137,6 +137,18 @@ type ScreenshotRequest struct {
 	FullPage bool   `json:"full_page"`
 }
 
+type JSExecuteRequest struct {
+	URL          string `json:"url"`
+	Expression   string `json:"expression"`
+	AwaitPromise bool   `json:"await_promise"`
+	WaitMs       int    `json:"wait_ms"`
+}
+
+type DiffRequest struct {
+	OldText string `json:"old_text"`
+	NewText string `json:"new_text"`
+}
+
 type BM25Request struct {
 	URL       string  `json:"url"`
 	Query     string  `json:"query"`
@@ -166,6 +178,9 @@ func main() {
 	mux.HandleFunc("/screenshot", screenshotHandler(cfg, cdpClient))
 	mux.HandleFunc("/chunk", chunkHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/bm25", bm25Handler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/execute", jsExecuteHandler(cfg, cdpClient))
+	mux.HandleFunc("/diff", diffHandler())
+	mux.HandleFunc("/cdx", cdxHandler(httpClient))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
 
 	slog.Info("crawl4go starting",
@@ -728,6 +743,105 @@ func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 			"zenpanda": cdpClient.Healthy(ctx),
 		}
 		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+func jsExecuteHandler(cfg Config, cdpClient *browser.CDPClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req JSExecuteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" || req.Expression == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url and expression are required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		result, err := cdpClient.ExecuteJS(ctx, req.URL, req.WaitMs, req.Expression, req.AwaitPromise)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "js execution failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":    req.URL,
+			"result": result,
+		})
+	}
+}
+
+func diffHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req DiffRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		result := content.DiffText(req.OldText, req.NewText)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"diff":     result,
+			"old_hash": content.ContentHash(req.OldText),
+			"new_hash": content.ContentHash(req.NewText),
+		})
+	}
+}
+
+func cdxHandler(httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req struct {
+			Domain  string `json:"domain"`
+			MaxURLs int    `json:"max_urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.Domain == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain is required"})
+			return
+		}
+		if req.MaxURLs <= 0 {
+			req.MaxURLs = 500
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		seeder := crawl.NewCDXSeeder(httpClient, req.MaxURLs)
+		records, err := seeder.Discover(ctx, req.Domain)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cdx discovery failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"domain":    req.Domain,
+			"records":   records,
+			"url_count": len(records),
+		})
 	}
 }
 
