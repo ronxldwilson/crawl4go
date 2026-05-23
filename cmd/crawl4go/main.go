@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ronxldwilson/crawl4go/internal/browser"
@@ -51,6 +52,8 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
+// --- Request / Response types ---
+
 type CrawlRequest struct {
 	URL            string `json:"url"`
 	WaitMs         int    `json:"wait_ms"`
@@ -59,17 +62,23 @@ type CrawlRequest struct {
 	Output         string `json:"output"`
 	Prune          bool   `json:"prune"`
 	Proxy          bool   `json:"proxy"`
+	ExtractMeta    bool   `json:"extract_meta"`
+	ExtractTables  bool   `json:"extract_tables"`
+	ExtractMedia   bool   `json:"extract_media"`
 }
 
 type CrawlResponse struct {
-	URL          string          `json:"url"`
-	StatusCode   int             `json:"status_code"`
-	Blocked      bool            `json:"blocked"`
-	BlockReason  string          `json:"block_reason,omitempty"`
-	Content      string          `json:"content"`
-	Links        content.LinkSet `json:"links"`
-	RenderTimeMs int64           `json:"render_time_ms"`
-	RenderSource string          `json:"render_source"`
+	URL          string                   `json:"url"`
+	StatusCode   int                      `json:"status_code"`
+	Blocked      bool                     `json:"blocked"`
+	BlockReason  string                   `json:"block_reason,omitempty"`
+	Content      string                   `json:"content"`
+	Links        content.LinkSet          `json:"links"`
+	Metadata     *content.PageMetadata    `json:"metadata,omitempty"`
+	Tables       []content.ExtractedTable `json:"tables,omitempty"`
+	Media        *content.MediaSet        `json:"media,omitempty"`
+	RenderTimeMs int64                    `json:"render_time_ms"`
+	RenderSource string                   `json:"render_source"`
 }
 
 type DeepCrawlRequest struct {
@@ -85,11 +94,29 @@ type DeepCrawlRequest struct {
 	Prune           bool                `json:"prune"`
 	Scroll          bool                `json:"scroll"`
 	WaitMs          int                 `json:"wait_ms"`
+	QueryTerms      []string            `json:"query_terms,omitempty"`
 }
 
 type DeepCrawlResponse struct {
 	Results []crawl.DeepCrawlResult `json:"results"`
 	Stats   crawl.CrawlStats        `json:"stats"`
+}
+
+type ExtractRequest struct {
+	URL    string                  `json:"url"`
+	Schema content.ExtractionSchema `json:"schema"`
+	WaitMs int                     `json:"wait_ms"`
+	Proxy  bool                    `json:"proxy"`
+}
+
+type LinkPreviewRequest struct {
+	URLs           []string `json:"urls"`
+	MaxConcurrent  int      `json:"max_concurrent"`
+}
+
+type SitemapRequest struct {
+	URL     string `json:"url"`
+	MaxURLs int    `json:"max_urls"`
 }
 
 func main() {
@@ -99,11 +126,17 @@ func main() {
 	httpClient := &http.Client{Timeout: 90 * time.Second}
 	pruner := content.NewPruningFilter()
 	robots := crawl.NewRobotsChecker()
+	rateLimiter := crawl.NewRateLimiter()
 
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/crawl", crawlHandler(cfg, cdpClient, httpClient, pruner))
-	mux.HandleFunc("/deep-crawl", deepCrawlHandler(cfg, cdpClient, httpClient, pruner, robots))
-	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/deep-crawl", deepCrawlHandler(cfg, cdpClient, httpClient, pruner, robots, rateLimiter))
+	mux.HandleFunc("/extract", extractHandler(cfg, cdpClient, httpClient))
+	mux.HandleFunc("/link-preview", linkPreviewHandler(httpClient))
+	mux.HandleFunc("/sitemap", sitemapHandler(httpClient))
+	mux.HandleFunc("/cert/", certHandler())
+	mux.HandleFunc("/health", healthHandler(cdpClient))
 
 	slog.Info("crawl4go starting",
 		"port", cfg.Port,
@@ -117,6 +150,8 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// --- Handlers ---
 
 func crawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +209,22 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *browser.CDPClie
 	blocked, reason := content.IsBlocked(statusCode, htmlContent)
 	links := content.ExtractLinks(htmlContent, req.URL)
 
+	var metadata *content.PageMetadata
+	if req.ExtractMeta {
+		metadata = content.ExtractMetadata(htmlContent)
+	}
+
+	var tables []content.ExtractedTable
+	if req.ExtractTables {
+		tables = content.ExtractTables(htmlContent)
+	}
+
+	var media *content.MediaSet
+	if req.ExtractMedia {
+		ms := content.ExtractMedia(htmlContent, req.URL)
+		media = &ms
+	}
+
 	pageContent := htmlContent
 	if req.Prune {
 		if pruned, err := pruner.Filter(htmlContent); err == nil && len(pruned) > 0 {
@@ -195,12 +246,15 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *browser.CDPClie
 		BlockReason:  reason,
 		Content:      pageContent,
 		Links:        links,
+		Metadata:     metadata,
+		Tables:       tables,
+		Media:        media,
 		RenderTimeMs: time.Since(start).Milliseconds(),
 		RenderSource: source,
 	}
 }
 
-func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, robots *crawl.RobotsChecker) http.HandlerFunc {
+func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, robots *crawl.RobotsChecker, rateLimiter *crawl.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -246,6 +300,10 @@ func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http
 		}
 
 		crawlFn := func(ctx context.Context, pageURL string) (*crawl.DeepCrawlResult, error) {
+			if err := rateLimiter.Wait(ctx, pageURL); err != nil {
+				return nil, err
+			}
+
 			crawlReq := CrawlRequest{
 				URL:            pageURL,
 				WaitMs:         req.WaitMs,
@@ -256,6 +314,9 @@ func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http
 				Proxy:          true,
 			}
 			resp := crawlSinglePage(ctx, cfg, cdpClient, httpClient, pruner, crawlReq)
+
+			rateLimiter.RecordResult(pageURL, resp.StatusCode)
+
 			return &crawl.DeepCrawlResult{
 				URL:          resp.URL,
 				StatusCode:   resp.StatusCode,
@@ -282,6 +343,8 @@ func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http
 			strategy = &crawl.DFSStrategy{}
 		case "best-first":
 			strategy = &crawl.BestFirstStrategy{}
+		case "adaptive":
+			strategy = crawl.NewAdaptiveStrategy(req.QueryTerms)
 		default:
 			strategy = &crawl.BFSStrategy{}
 		}
@@ -304,8 +367,149 @@ func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http
 	}
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+func extractHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req ExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		extractor := content.NewCSSExtractor(req.Schema)
+		results, err := extractor.Extract(htmlContent)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":     req.URL,
+			"results": results,
+		})
+	}
+}
+
+func linkPreviewHandler(httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req LinkPreviewRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if len(req.URLs) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "urls is required"})
+			return
+		}
+		if req.MaxConcurrent <= 0 {
+			req.MaxConcurrent = 5
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		previews := content.FetchLinkPreviews(ctx, req.URLs, httpClient, req.MaxConcurrent)
+		writeJSON(w, http.StatusOK, map[string]any{"previews": previews})
+	}
+}
+
+func sitemapHandler(httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req SitemapRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.MaxURLs <= 0 {
+			req.MaxURLs = 1000
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+
+		seeder := crawl.NewSitemapSeeder(httpClient, req.MaxURLs)
+		urls, err := seeder.Discover(ctx, req.URL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sitemap discovery failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":       req.URL,
+			"urls":      urls,
+			"url_count": len(urls),
+		})
+	}
+}
+
+func certHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host := strings.TrimPrefix(r.URL.Path, "/cert/")
+		if host == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host is required (GET /cert/{host})"})
+			return
+		}
+
+		certInfo, err := content.InspectCert(host)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cert inspection failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, certInfo)
+	}
+}
+
+func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		status := map[string]any{
+			"status":   "ok",
+			"zenpanda": cdpClient.Healthy(ctx),
+		}
+		writeJSON(w, http.StatusOK, status)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
