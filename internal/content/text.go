@@ -8,7 +8,7 @@ import (
 var (
 	HtmlTagRe     = regexp.MustCompile(`<[^>]*>`)
 	WhitespaceRe  = regexp.MustCompile(`\s+`)
-	ScriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</\1>`)
+	ScriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</(script|style|noscript)>`)
 )
 
 func HTMLToText(htmlContent string) string {
