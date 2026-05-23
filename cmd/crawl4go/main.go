@@ -137,6 +137,20 @@ type ScreenshotRequest struct {
 	FullPage bool   `json:"full_page"`
 }
 
+type XPathExtractRequest struct {
+	URL    string                      `json:"url"`
+	Schema content.XPathExtractionSchema `json:"schema"`
+	WaitMs int                         `json:"wait_ms"`
+	Proxy  bool                        `json:"proxy"`
+}
+
+type RegexExtractRequest struct {
+	URL    string                      `json:"url"`
+	Schema content.RegexExtractionSchema `json:"schema"`
+	WaitMs int                         `json:"wait_ms"`
+	Proxy  bool                        `json:"proxy"`
+}
+
 type JSExecuteRequest struct {
 	URL          string `json:"url"`
 	Expression   string `json:"expression"`
@@ -178,6 +192,8 @@ func main() {
 	mux.HandleFunc("/screenshot", screenshotHandler(cfg, cdpClient))
 	mux.HandleFunc("/chunk", chunkHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/bm25", bm25Handler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/extract-xpath", xpathExtractHandler(cfg, cdpClient, httpClient))
+	mux.HandleFunc("/extract-regex", regexExtractHandler(cfg, cdpClient, httpClient))
 	mux.HandleFunc("/execute", jsExecuteHandler(cfg, cdpClient))
 	mux.HandleFunc("/diff", diffHandler())
 	mux.HandleFunc("/cdx", cdxHandler(httpClient))
@@ -743,6 +759,102 @@ func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 			"zenpanda": cdpClient.Healthy(ctx),
 		}
 		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+func xpathExtractHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req XPathExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		extractor := content.NewXPathExtractor(req.Schema)
+		results, err := extractor.Extract(htmlContent)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "xpath extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":     req.URL,
+			"results": results,
+		})
+	}
+}
+
+func regexExtractHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req RegexExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := ""
+		if req.Proxy {
+			proxyURL = cfg.TorProxyURL
+		}
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		extractor := content.NewRegexExtractor(req.Schema)
+		results, err := extractor.Extract(htmlContent)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "regex extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":     req.URL,
+			"results": results,
+		})
 	}
 }
 
