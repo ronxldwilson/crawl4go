@@ -189,7 +189,13 @@ func httpFetchHTML(ctx context.Context, client *http.Client, pageURL string, pro
 	if err != nil {
 		return "", 0, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+	ua := RandomUA()
+	req.Header.Set("User-Agent", ua.UserAgent)
+	if ua.SecCHUA != "" {
+		req.Header.Set("Sec-CH-UA", ua.SecCHUA)
+		req.Header.Set("Sec-CH-UA-Platform", ua.SecCHUAPlat)
+		req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
