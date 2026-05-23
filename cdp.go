@@ -132,11 +132,6 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 	json.Unmarshal(attachResult, &attached)
 	sid := attached.SessionID
 
-	// Inject stealth JS before navigation
-	sendCmd("Runtime.evaluate", map[string]any{
-		"expression": stealthJS(),
-	}, sid)
-
 	if _, err := sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
 		return "", fmt.Errorf("navigate: %w", err)
 	}
@@ -146,6 +141,8 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+
+	injectBrowserScripts(sendCmd, sid)
 
 	if scroll {
 		scrollPage(sendCmd, sid, maxScrollSteps)

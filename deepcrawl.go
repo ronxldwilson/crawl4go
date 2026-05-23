@@ -188,7 +188,7 @@ func (s *DFSStrategy) Run(ctx context.Context, startURL string, crawlFn CrawlFun
 			continue
 		}
 
-		newLinks := discoverLinks(*result, visited, depths, item.depth+1, opts)
+		newLinks := discoverLinks(ctx, *result, visited, depths, item.depth+1, opts)
 		// Reverse so first-discovered links are processed next
 		for i := len(newLinks) - 1; i >= 0; i-- {
 			stack = append(stack, stackItem{
