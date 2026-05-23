@@ -131,6 +131,12 @@ type ChunkRequest struct {
 	Proxy     bool  `json:"proxy"`
 }
 
+type ScreenshotRequest struct {
+	URL      string `json:"url"`
+	WaitMs   int    `json:"wait_ms"`
+	FullPage bool   `json:"full_page"`
+}
+
 type BM25Request struct {
 	URL       string  `json:"url"`
 	Query     string  `json:"query"`
@@ -157,6 +163,7 @@ func main() {
 	mux.HandleFunc("/link-preview", linkPreviewHandler(httpClient))
 	mux.HandleFunc("/sitemap", sitemapHandler(httpClient))
 	mux.HandleFunc("/cert/", certHandler())
+	mux.HandleFunc("/screenshot", screenshotHandler(cfg, cdpClient))
 	mux.HandleFunc("/chunk", chunkHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/bm25", bm25Handler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
@@ -538,6 +545,42 @@ func certHandler() http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, certInfo)
+	}
+}
+
+func screenshotHandler(cfg Config, cdpClient *browser.CDPClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req ScreenshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		data, err := cdpClient.CaptureScreenshot(ctx, req.URL, req.WaitMs, req.FullPage)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "screenshot failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":  req.URL,
+			"data": data,
+		})
 	}
 }
 
