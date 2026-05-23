@@ -1,4 +1,4 @@
-package main
+package ua
 
 import (
 	"fmt"
@@ -76,9 +76,9 @@ func initUAPool() {
 		}
 
 		safariMacVersions := []struct {
-			osVer      string
-			safariVer  string
-			webkitVer  string
+			osVer     string
+			safariVer string
+			webkitVer string
 		}{
 			{"10_15_7", "17.2", "605.1.15"},
 			{"14_0", "17.3", "605.1.15"},
@@ -96,7 +96,6 @@ func initUAPool() {
 	})
 }
 
-// RandomUA returns a random realistic user agent string with matching Client Hints headers.
 func RandomUA() UAResult {
 	initUAPool()
 	entry := uaPool[rand.Intn(len(uaPool))]

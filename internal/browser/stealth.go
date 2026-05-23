@@ -1,6 +1,5 @@
-package main
+package browser
 
-// StealthFlags returns Chrome launch flags for anti-detection.
 func StealthFlags() []string {
 	return []string{
 		"--disable-blink-features=AutomationControlled",
@@ -32,4 +31,3 @@ func StealthFlags() []string {
 		"--mute-audio",
 	}
 }
-

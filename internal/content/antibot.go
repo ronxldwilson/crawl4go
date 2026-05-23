@@ -1,4 +1,4 @@
-package main
+package content
 
 import (
 	"regexp"
@@ -48,12 +48,9 @@ var (
 	scriptTagsRe  = regexp.MustCompile(`(?i)<script[\s>]`)
 )
 
-// IsBlocked checks if a page is a bot-detection block page.
-// Returns (blocked, reason).
 func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 	size := len(htmlContent)
 
-	// HTTP status checks
 	if statusCode == 429 {
 		return true, "rate limited (429)"
 	}
@@ -63,7 +60,6 @@ func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 		}
 	}
 
-	// Tier 1: structural markers — any page size
 	checkContent := htmlContent
 	if size > 15_000 {
 		checkContent = htmlContent[:15_000]
@@ -82,7 +78,6 @@ func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 		}
 	}
 
-	// Tier 2: generic terms — short pages only
 	if size < tier2MaxSize {
 		for _, p := range tier2Patterns {
 			if p.re.MatchString(htmlContent) {
@@ -91,7 +86,6 @@ func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 		}
 	}
 
-	// Status codes with tier 2 match
 	if statusCode >= 400 && size < tier2MaxSize {
 		for _, p := range tier2Patterns {
 			if p.re.MatchString(htmlContent) {
@@ -100,12 +94,10 @@ func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 		}
 	}
 
-	// 200 + near-empty
 	if statusCode == 200 && size < 100 {
 		return true, "near-empty response"
 	}
 
-	// Tier 3: structural integrity — pages < 50KB
 	if size < tier3MaxSize {
 		signals := structuralIntegrityCheck(htmlContent)
 		if signals >= 2 {
@@ -122,26 +114,22 @@ func IsBlocked(statusCode int, htmlContent string) (bool, string) {
 func structuralIntegrityCheck(htmlContent string) int {
 	signals := 0
 
-	// Signal 1: no <body> tag
 	if !bodyTagRe.MatchString(htmlContent) {
 		signals++
 	}
 
-	// Signal 2: minimal visible text
 	visibleText := stripScriptsStyles(htmlContent)
-	visibleText = htmlTagRe.ReplaceAllString(visibleText, "")
-	visibleText = strings.TrimSpace(whitespaceRe.ReplaceAllString(visibleText, " "))
+	visibleText = HtmlTagRe.ReplaceAllString(visibleText, "")
+	visibleText = strings.TrimSpace(WhitespaceRe.ReplaceAllString(visibleText, " "))
 	if len(visibleText) < 50 {
 		signals++
 	}
 
-	// Signal 3: no content elements
 	contentElements := contentTagsRe.FindAllStringIndex(htmlContent, -1)
 	if len(contentElements) == 0 {
 		signals++
 	}
 
-	// Signal 4: script-heavy shell
 	scripts := scriptTagsRe.FindAllStringIndex(htmlContent, -1)
 	if len(scripts) > 0 && len(contentElements) == 0 && len(visibleText) < 100 {
 		signals++
@@ -159,7 +147,7 @@ func looksLikeData(content string) bool {
 }
 
 func stripScriptsStyles(htmlContent string) string {
-	return scriptStyleRe.ReplaceAllString(htmlContent, " ")
+	return ScriptStyleRe.ReplaceAllString(htmlContent, " ")
 }
 
 func statusCodeStr(code int) string {

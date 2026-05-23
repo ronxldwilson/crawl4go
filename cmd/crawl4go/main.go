@@ -9,6 +9,10 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/ronxldwilson/crawl4go/internal/browser"
+	"github.com/ronxldwilson/crawl4go/internal/content"
+	"github.com/ronxldwilson/crawl4go/internal/crawl"
 )
 
 type Config struct {
@@ -47,70 +51,54 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
-// --- Request / Response types ---
-
 type CrawlRequest struct {
 	URL            string `json:"url"`
 	WaitMs         int    `json:"wait_ms"`
 	Scroll         bool   `json:"scroll"`
 	MaxScrollSteps int    `json:"max_scroll_steps"`
-	Output         string `json:"output"` // "markdown", "text", "html"
+	Output         string `json:"output"`
 	Prune          bool   `json:"prune"`
 	Proxy          bool   `json:"proxy"`
 }
 
 type CrawlResponse struct {
-	URL          string  `json:"url"`
-	StatusCode   int     `json:"status_code"`
-	Blocked      bool    `json:"blocked"`
-	BlockReason  string  `json:"block_reason,omitempty"`
-	Content      string  `json:"content"`
-	Links        LinkSet `json:"links"`
-	RenderTimeMs int64   `json:"render_time_ms"`
-	RenderSource string  `json:"render_source"`
+	URL          string          `json:"url"`
+	StatusCode   int             `json:"status_code"`
+	Blocked      bool            `json:"blocked"`
+	BlockReason  string          `json:"block_reason,omitempty"`
+	Content      string          `json:"content"`
+	Links        content.LinkSet `json:"links"`
+	RenderTimeMs int64           `json:"render_time_ms"`
+	RenderSource string          `json:"render_source"`
 }
 
 type DeepCrawlRequest struct {
-	URL             string             `json:"url"`
-	Strategy        string             `json:"strategy"` // "bfs", "dfs", "best-first"
-	MaxDepth        int                `json:"max_depth"`
-	MaxPages        int                `json:"max_pages"`
-	IncludeExternal bool               `json:"include_external"`
-	Filters         *FilterConfig      `json:"filters,omitempty"`
-	Scorer          *ScorerConfig      `json:"scorer,omitempty"`
-	ScoreThreshold  float64            `json:"score_threshold"`
-	Output          string             `json:"output"`
-	Prune           bool               `json:"prune"`
-	Scroll          bool               `json:"scroll"`
-	WaitMs          int                `json:"wait_ms"`
-}
-
-type FilterConfig struct {
-	URLPatterns      []string `json:"url_patterns,omitempty"`
-	BlockedDomains   []string `json:"blocked_domains,omitempty"`
-	AllowedDomains   []string `json:"allowed_domains,omitempty"`
-	AllowedExtensions []string `json:"allowed_extensions,omitempty"`
-}
-
-type ScorerConfig struct {
-	Keywords       []string `json:"keywords,omitempty"`
-	KeywordWeight  float64  `json:"keyword_weight"`
-	FreshnessWeight float64 `json:"freshness_weight"`
-	DepthWeight    float64  `json:"depth_weight"`
+	URL             string              `json:"url"`
+	Strategy        string              `json:"strategy"`
+	MaxDepth        int                 `json:"max_depth"`
+	MaxPages        int                 `json:"max_pages"`
+	IncludeExternal bool                `json:"include_external"`
+	Filters         *crawl.FilterConfig `json:"filters,omitempty"`
+	Scorer          *crawl.ScorerConfig `json:"scorer,omitempty"`
+	ScoreThreshold  float64             `json:"score_threshold"`
+	Output          string              `json:"output"`
+	Prune           bool                `json:"prune"`
+	Scroll          bool                `json:"scroll"`
+	WaitMs          int                 `json:"wait_ms"`
 }
 
 type DeepCrawlResponse struct {
-	Results []DeepCrawlResult `json:"results"`
-	Stats   CrawlStats        `json:"stats"`
+	Results []crawl.DeepCrawlResult `json:"results"`
+	Stats   crawl.CrawlStats        `json:"stats"`
 }
 
 func main() {
 	cfg := loadConfig()
 
-	cdpClient := NewCDPClient(cfg.ZenPandaURL, cfg.MaxConcurrent)
+	cdpClient := browser.NewCDPClient(cfg.ZenPandaURL, cfg.MaxConcurrent)
 	httpClient := &http.Client{Timeout: 90 * time.Second}
-	pruner := NewPruningFilter()
-	robots := NewRobotsChecker()
+	pruner := content.NewPruningFilter()
+	robots := crawl.NewRobotsChecker()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/crawl", crawlHandler(cfg, cdpClient, httpClient, pruner))
@@ -130,7 +118,7 @@ func main() {
 	}
 }
 
-func crawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client, pruner *PruningFilter) http.HandlerFunc {
+func crawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -164,7 +152,7 @@ func crawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client, pru
 	}
 }
 
-func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *CDPClient, httpClient *http.Client, pruner *PruningFilter, req CrawlRequest) CrawlResponse {
+func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, req CrawlRequest) CrawlResponse {
 	start := time.Now()
 
 	proxyURL := ""
@@ -172,7 +160,7 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *CDPClient, http
 		proxyURL = cfg.TorProxyURL
 	}
 
-	htmlContent, statusCode, source, err := RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, req.Scroll, req.MaxScrollSteps, proxyURL)
+	htmlContent, statusCode, source, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, req.Scroll, req.MaxScrollSteps, proxyURL)
 	if err != nil {
 		return CrawlResponse{
 			URL:          req.URL,
@@ -183,22 +171,21 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *CDPClient, http
 		}
 	}
 
-	blocked, reason := IsBlocked(statusCode, htmlContent)
+	blocked, reason := content.IsBlocked(statusCode, htmlContent)
+	links := content.ExtractLinks(htmlContent, req.URL)
 
-	links := ExtractLinks(htmlContent, req.URL)
-
-	content := htmlContent
+	pageContent := htmlContent
 	if req.Prune {
 		if pruned, err := pruner.Filter(htmlContent); err == nil && len(pruned) > 0 {
-			content = pruned
+			pageContent = pruned
 		}
 	}
 
 	switch req.Output {
 	case "text":
-		content = HTMLToText(content)
+		pageContent = content.HTMLToText(pageContent)
 	case "markdown":
-		content = HTMLToMarkdown(content, req.URL)
+		pageContent = content.HTMLToMarkdown(pageContent, req.URL)
 	}
 
 	return CrawlResponse{
@@ -206,14 +193,14 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *CDPClient, http
 		StatusCode:   statusCode,
 		Blocked:      blocked,
 		BlockReason:  reason,
-		Content:      content,
+		Content:      pageContent,
 		Links:        links,
 		RenderTimeMs: time.Since(start).Milliseconds(),
 		RenderSource: source,
 	}
 }
 
-func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client, pruner *PruningFilter, robots *RobotsChecker) http.HandlerFunc {
+func deepCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, robots *crawl.RobotsChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -248,17 +235,17 @@ func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client,
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
 		defer cancel()
 
-		var filters *FilterChain
+		var filters *crawl.FilterChain
 		if req.Filters != nil {
-			filters = BuildFilterChain(req.Filters)
+			filters = crawl.BuildFilterChain(req.Filters)
 		}
 
-		var scorer URLScorer
+		var scorer crawl.URLScorer
 		if req.Scorer != nil {
-			scorer = BuildScorer(req.Scorer)
+			scorer = crawl.BuildScorer(req.Scorer)
 		}
 
-		crawlFn := func(ctx context.Context, pageURL string) (*DeepCrawlResult, error) {
+		crawlFn := func(ctx context.Context, pageURL string) (*crawl.DeepCrawlResult, error) {
 			crawlReq := CrawlRequest{
 				URL:            pageURL,
 				WaitMs:         req.WaitMs,
@@ -269,7 +256,7 @@ func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client,
 				Proxy:          true,
 			}
 			resp := crawlSinglePage(ctx, cfg, cdpClient, httpClient, pruner, crawlReq)
-			return &DeepCrawlResult{
+			return &crawl.DeepCrawlResult{
 				URL:          resp.URL,
 				StatusCode:   resp.StatusCode,
 				Blocked:      resp.Blocked,
@@ -279,7 +266,7 @@ func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client,
 			}, nil
 		}
 
-		opts := CrawlOptions{
+		opts := crawl.CrawlOptions{
 			MaxDepth:        req.MaxDepth,
 			MaxPages:        req.MaxPages,
 			IncludeExternal: req.IncludeExternal,
@@ -289,14 +276,14 @@ func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client,
 			Robots:          robots,
 		}
 
-		var strategy CrawlStrategy
+		var strategy crawl.CrawlStrategy
 		switch req.Strategy {
 		case "dfs":
-			strategy = &DFSStrategy{}
+			strategy = &crawl.DFSStrategy{}
 		case "best-first":
-			strategy = &BestFirstStrategy{}
+			strategy = &crawl.BestFirstStrategy{}
 		default:
-			strategy = &BFSStrategy{}
+			strategy = &crawl.BFSStrategy{}
 		}
 
 		results, stats := strategy.Run(ctx, req.URL, crawlFn, opts)

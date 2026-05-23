@@ -1,4 +1,4 @@
-package main
+package content
 
 import (
 	"net/url"
@@ -40,7 +40,7 @@ func ExtractLinks(htmlContent string, baseURL string) LinkSet {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
-			href := getAttr(n, "href")
+			href := GetAttr(n, "href")
 			if href == "" || href == "#" {
 				goto children
 			}
@@ -57,7 +57,7 @@ func ExtractLinks(htmlContent string, baseURL string) LinkSet {
 				}
 				seen[normalized] = true
 
-				text := extractText(n)
+				text := ExtractText(n)
 				link := Link{Href: normalized, Text: text}
 
 				if isExternalURL(normalized, baseDomain) {
@@ -94,7 +94,6 @@ func NormalizeURL(href string, base *url.URL) string {
 	resolved.Host = strings.ToLower(resolved.Host)
 	resolved.Fragment = ""
 
-	// Remove tracking parameters
 	q := resolved.Query()
 	changed := false
 	for key := range q {
@@ -107,7 +106,6 @@ func NormalizeURL(href string, base *url.URL) string {
 		resolved.RawQuery = q.Encode()
 	}
 
-	// Normalize trailing slash (keep for root, remove otherwise)
 	if resolved.Path != "/" {
 		resolved.Path = strings.TrimRight(resolved.Path, "/")
 	}
@@ -145,7 +143,7 @@ func isExternalURL(href string, baseDomain string) bool {
 	return true
 }
 
-func getAttr(n *html.Node, key string) string {
+func GetAttr(n *html.Node, key string) string {
 	for _, a := range n.Attr {
 		if a.Key == key {
 			return a.Val
@@ -154,13 +152,13 @@ func getAttr(n *html.Node, key string) string {
 	return ""
 }
 
-func extractText(n *html.Node) string {
+func ExtractText(n *html.Node) string {
 	if n.Type == html.TextNode {
 		return n.Data
 	}
 	var sb strings.Builder
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		sb.WriteString(extractText(c))
+		sb.WriteString(ExtractText(c))
 	}
 	return strings.TrimSpace(sb.String())
 }

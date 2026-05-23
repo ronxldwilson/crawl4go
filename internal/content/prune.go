@@ -1,4 +1,4 @@
-package main
+package content
 
 import (
 	"bytes"
@@ -42,15 +42,12 @@ func (pf *PruningFilter) Filter(htmlContent string) (string, error) {
 		return "", err
 	}
 
-	body := findBody(doc)
+	body := FindBody(doc)
 	if body == nil {
 		return htmlContent, nil
 	}
 
-	// Remove excluded tags first
 	removeExcludedTags(body)
-
-	// Recursive pruning
 	pf.pruneTree(body)
 
 	var buf bytes.Buffer
@@ -90,29 +87,23 @@ func (pf *PruningFilter) computeScore(n *html.Node) float64 {
 		return -1.0
 	}
 
-	// Text density (weight: 0.4)
 	textDensity := textLen / tagLen
-
-	// Link density (weight: 0.2) — penalizes link-heavy regions
 	linkDensity := 1.0 - (linkTextLen / textLen)
 	if linkDensity < 0 {
 		linkDensity = 0
 	}
 
-	// Tag weight (weight: 0.2)
 	tw := 0.5
 	if w, ok := tagWeights[n.Data]; ok {
 		tw = w
 	}
 
-	// Class/ID weight (weight: 0.1)
 	classIDWeight := 1.0
-	classVal := getAttr(n, "class") + " " + getAttr(n, "id")
+	classVal := GetAttr(n, "class") + " " + GetAttr(n, "id")
 	if negativeClassRe.MatchString(classVal) {
 		classIDWeight = 0.2
 	}
 
-	// Text length score (weight: 0.1)
 	textLenScore := math.Log(textLen+1) / 10.0
 	if textLenScore > 1.0 {
 		textLenScore = 1.0
@@ -142,12 +133,12 @@ func (pf *PruningFilter) dynamicThreshold(n *html.Node) float64 {
 	return threshold
 }
 
-func findBody(n *html.Node) *html.Node {
+func FindBody(n *html.Node) *html.Node {
 	if n.Type == html.ElementNode && n.DataAtom == atom.Body {
 		return n
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if found := findBody(c); found != nil {
+		if found := FindBody(c); found != nil {
 			return found
 		}
 	}

@@ -1,4 +1,4 @@
-package main
+package crawl
 
 import (
 	"math"
@@ -13,7 +13,6 @@ type URLScorer interface {
 	Score(rawURL string) float64
 }
 
-// CompositeScorer combines multiple scorers with weights.
 type CompositeScorer struct {
 	scorers []weightedScorer
 }
@@ -43,7 +42,6 @@ func (cs *CompositeScorer) Score(rawURL string) float64 {
 	return totalScore / totalWeight
 }
 
-// KeywordRelevanceScorer scores based on keyword presence in the URL.
 type KeywordRelevanceScorer struct {
 	keywords []string
 }
@@ -70,7 +68,6 @@ func (s *KeywordRelevanceScorer) Score(rawURL string) float64 {
 	return float64(matches) / float64(len(s.keywords))
 }
 
-// PathDepthScorer scores based on URL path depth relative to an optimal depth.
 type PathDepthScorer struct {
 	optimalDepth int
 }
@@ -96,7 +93,6 @@ func (s *PathDepthScorer) Score(rawURL string) float64 {
 	return 1.0 / (1.0 + distance)
 }
 
-// ContentTypeScorer scores based on file extension.
 type ContentTypeScorer struct {
 	scores map[string]float64
 }
@@ -142,7 +138,6 @@ func (s *ContentTypeScorer) Score(rawURL string) float64 {
 	return 0.5
 }
 
-// FreshnessScorer scores based on date patterns found in the URL path.
 var dateInURLRe = regexp.MustCompile(`(?:^|/)(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?:/|$)`)
 
 type FreshnessScorer struct {
@@ -160,7 +155,7 @@ func (s *FreshnessScorer) Score(rawURL string) float64 {
 	}
 	matches := dateInURLRe.FindStringSubmatch(u.Path)
 	if len(matches) < 2 {
-		return 0.5 // no date = neutral
+		return 0.5
 	}
 
 	year, err := strconv.Atoi(matches[1])

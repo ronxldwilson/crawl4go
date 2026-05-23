@@ -1,4 +1,4 @@
-package main
+package crawl
 
 import (
 	"net/url"
@@ -24,7 +24,6 @@ func (fc *FilterChain) Apply(rawURL string) bool {
 	return true
 }
 
-// URLPatternFilter accepts URLs matching any of the given glob/regex patterns.
 type URLPatternFilter struct {
 	patterns []*regexp.Regexp
 }
@@ -32,7 +31,6 @@ type URLPatternFilter struct {
 func NewURLPatternFilter(patterns []string) *URLPatternFilter {
 	var compiled []*regexp.Regexp
 	for _, p := range patterns {
-		// Convert simple glob patterns to regex
 		re := globToRegex(p)
 		if r, err := regexp.Compile(re); err == nil {
 			compiled = append(compiled, r)
@@ -53,7 +51,6 @@ func (f *URLPatternFilter) Apply(rawURL string) bool {
 	return false
 }
 
-// DomainFilter blocks or allows specific domains.
 type DomainFilter struct {
 	blocked map[string]bool
 	allowed map[string]bool
@@ -106,7 +103,6 @@ func (f *DomainFilter) Apply(rawURL string) bool {
 	return true
 }
 
-// ContentTypeFilter filters by file extension.
 type ContentTypeFilter struct {
 	allowed map[string]bool
 }
@@ -131,7 +127,6 @@ func (f *ContentTypeFilter) Apply(rawURL string) bool {
 		return false
 	}
 	ext := strings.ToLower(path.Ext(u.Path))
-	// No extension = likely HTML page
 	if ext == "" {
 		return f.allowed[""]
 	}

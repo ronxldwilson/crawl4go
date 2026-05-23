@@ -1,16 +1,11 @@
-package main
+package browser
 
-import (
-	"encoding/json"
-	"log/slog"
-)
+import "log/slog"
 
-// injectBrowserScripts runs all JS snippets in the CDP session after navigation.
-// Order: navigator override → consent popups → overlays → shadow DOM → image dimensions
 func injectBrowserScripts(sendCmd sendCmdFunc, sessionID string) {
 	scripts := []struct {
-		name   string
-		js     string
+		name    string
+		js      string
 		isAsync bool
 	}{
 		{"navigator_override", jsNavigatorOverride, false},

@@ -1,4 +1,4 @@
-package main
+package content
 
 import (
 	"fmt"
@@ -10,7 +10,6 @@ import (
 
 var inlineLinkRe = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 
-// HTMLToMarkdown converts HTML content to Markdown with optional citation-style links.
 func HTMLToMarkdown(htmlContent string, baseURL string) string {
 	md, err := htmltomarkdown.ConvertString(htmlContent)
 	if err != nil {

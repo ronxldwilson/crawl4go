@@ -1,4 +1,4 @@
-package main
+package browser
 
 import (
 	"encoding/json"
@@ -9,7 +9,6 @@ import (
 
 type sendCmdFunc func(method string, params any, sessionID string) (json.RawMessage, error)
 
-// scrollPage scrolls the page incrementally to trigger lazy-loaded content.
 func scrollPage(sendCmd sendCmdFunc, sessionID string, maxSteps int) {
 	if maxSteps <= 0 {
 		maxSteps = 10
@@ -74,13 +73,11 @@ func scrollPage(sendCmd sendCmdFunc, sessionID string, maxSteps int) {
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	// Check if images are loaded
 	sendCmd("Runtime.evaluate", map[string]any{
 		"expression":    "Array.from(document.images).every(img => img.complete)",
 		"returnByValue": true,
 	}, sessionID)
 
-	// Scroll back to top
 	sendCmd("Runtime.evaluate", map[string]any{
 		"expression":    "window.scrollTo(0, 0)",
 		"returnByValue": true,

@@ -1,4 +1,4 @@
-package main
+package content
 
 import (
 	"math"
@@ -46,7 +46,6 @@ func NewBM25Filter() *BM25Filter {
 	return &BM25Filter{K1: 2.0, B: 0.75, Threshold: 1.0}
 }
 
-// FilterByRelevance scores and filters text chunks by BM25 relevance to a query.
 func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextChunk {
 	if len(chunks) == 0 || query == "" {
 		return chunks
@@ -57,7 +56,6 @@ func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextC
 		return chunks
 	}
 
-	// Compute average document length
 	totalLen := 0
 	for i := range chunks {
 		chunks[i].Tokens = tokenize(chunks[i].Text)
@@ -65,7 +63,6 @@ func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextC
 	}
 	avgDL := float64(totalLen) / float64(len(chunks))
 
-	// Compute document frequency for each query term
 	df := make(map[string]int)
 	for _, qt := range queryTokens {
 		for _, chunk := range chunks {
@@ -84,7 +81,6 @@ func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextC
 	for _, chunk := range chunks {
 		score := 0.0
 
-		// Term frequency map for this chunk
 		tf := make(map[string]int)
 		for _, t := range chunk.Tokens {
 			tf[t]++
@@ -98,17 +94,11 @@ func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextC
 				continue
 			}
 			docFreq := float64(df[qt])
-
-			// IDF
 			idf := math.Log((n-docFreq+0.5)/(docFreq+0.5) + 1)
-
-			// BM25 TF component
 			tfNorm := (termFreq * (f.K1 + 1)) / (termFreq + f.K1*(1-f.B+f.B*dl/avgDL))
-
 			score += idf * tfNorm
 		}
 
-		// Apply tag priority weight
 		if weight, ok := tagPriorityWeights[chunk.TagName]; ok {
 			score *= weight
 		}
@@ -121,7 +111,6 @@ func (f *BM25Filter) FilterByRelevance(chunks []TextChunk, query string) []TextC
 	return filtered
 }
 
-// ExtractTextChunks walks an HTML tree and extracts text blocks with their tag context.
 func ExtractTextChunks(htmlContent string) []TextChunk {
 	doc, err := html.Parse(strings.NewReader(htmlContent))
 	if err != nil {
@@ -161,7 +150,7 @@ func ExtractTextChunks(htmlContent string) []TextChunk {
 		}
 	}
 
-	body := findBody(doc)
+	body := FindBody(doc)
 	if body == nil {
 		body = doc
 	}
@@ -170,7 +159,6 @@ func ExtractTextChunks(htmlContent string) []TextChunk {
 	return chunks
 }
 
-// ExtractPageQuery extracts a search query from page metadata as a fallback.
 func ExtractPageQuery(htmlContent string) string {
 	doc, err := html.Parse(strings.NewReader(htmlContent))
 	if err != nil {
@@ -185,15 +173,15 @@ func ExtractPageQuery(htmlContent string) string {
 			switch n.DataAtom {
 			case atom.Title:
 				if title == "" {
-					title = extractText(n)
+					title = ExtractText(n)
 				}
 			case atom.H1:
 				if h1 == "" {
-					h1 = extractText(n)
+					h1 = ExtractText(n)
 				}
 			case atom.Meta:
-				name := strings.ToLower(getAttr(n, "name"))
-				content := getAttr(n, "content")
+				name := strings.ToLower(GetAttr(n, "name"))
+				content := GetAttr(n, "content")
 				if name == "keywords" && metaKeywords == "" {
 					metaKeywords = content
 				}
@@ -202,7 +190,7 @@ func ExtractPageQuery(htmlContent string) string {
 				}
 			case atom.P:
 				if firstParagraph == "" {
-					text := extractText(n)
+					text := ExtractText(n)
 					if len(text) > 150 {
 						firstParagraph = text
 					}

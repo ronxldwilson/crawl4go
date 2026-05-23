@@ -1,4 +1,4 @@
-package main
+package browser
 
 import (
 	"context"
@@ -8,18 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-)
-
-var (
-	htmlTagRe    = regexp.MustCompile(`<[^>]*>`)
-	whitespaceRe = regexp.MustCompile(`\s+`)
-	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</\1>`)
+	"github.com/ronxldwilson/crawl4go/internal/ua"
 )
 
 type CDPClient struct {
@@ -34,20 +28,6 @@ func NewCDPClient(zenPandaURL string, maxConcurrent int) *CDPClient {
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		sem:         make(chan struct{}, maxConcurrent),
 	}
-}
-
-type cdpMessage struct {
-	ID        int             `json:"id"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     *cdpError       `json:"error,omitempty"`
-	SessionID string          `json:"sessionId,omitempty"`
-}
-
-type cdpError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
 }
 
 func (c *CDPClient) browserWSURL() string {
@@ -69,7 +49,6 @@ func (c *CDPClient) release() {
 	<-c.sem
 }
 
-// FetchHTML navigates to a URL via CDP and returns the rendered HTML.
 func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int, scroll bool, maxScrollSteps int) (string, error) {
 	if err := c.acquire(ctx); err != nil {
 		return "", err
@@ -168,8 +147,7 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 	return evalResult.Result.Value, nil
 }
 
-// httpFetchHTML fetches a page via plain HTTP and returns the raw HTML.
-func httpFetchHTML(ctx context.Context, client *http.Client, pageURL string, proxyURL string) (string, int, error) {
+func HTTPFetchHTML(ctx context.Context, client *http.Client, pageURL string, proxyURL string) (string, int, error) {
 	transport := http.DefaultTransport
 	if proxyURL != "" {
 		proxy, err := url.Parse(proxyURL)
@@ -186,11 +164,11 @@ func httpFetchHTML(ctx context.Context, client *http.Client, pageURL string, pro
 	if err != nil {
 		return "", 0, err
 	}
-	ua := RandomUA()
-	req.Header.Set("User-Agent", ua.UserAgent)
-	if ua.SecCHUA != "" {
-		req.Header.Set("Sec-CH-UA", ua.SecCHUA)
-		req.Header.Set("Sec-CH-UA-Platform", ua.SecCHUAPlat)
+	uaResult := ua.RandomUA()
+	req.Header.Set("User-Agent", uaResult.UserAgent)
+	if uaResult.SecCHUA != "" {
+		req.Header.Set("Sec-CH-UA", uaResult.SecCHUA)
+		req.Header.Set("Sec-CH-UA-Platform", uaResult.SecCHUAPlat)
 		req.Header.Set("Sec-CH-UA-Mobile", "?0")
 	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -210,7 +188,6 @@ func httpFetchHTML(ctx context.Context, client *http.Client, pageURL string, pro
 	return string(body), resp.StatusCode, nil
 }
 
-// RenderPage races HTTP fetch against CDP render and returns the best result.
 func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Client, pageURL string, waitMs int, scroll bool, maxScrollSteps int, proxyURL string) (html string, statusCode int, source string, err error) {
 	type result struct {
 		html       string
@@ -221,9 +198,8 @@ func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Clie
 
 	ch := make(chan result, 2)
 
-	// HTTP fetch
 	go func() {
-		h, code, e := httpFetchHTML(ctx, httpClient, pageURL, proxyURL)
+		h, code, e := HTTPFetchHTML(ctx, httpClient, pageURL, proxyURL)
 		if e != nil || len(strings.TrimSpace(h)) < 200 {
 			ch <- result{err: fmt.Errorf("http fetch insufficient")}
 			return
@@ -234,7 +210,6 @@ func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Clie
 		ch <- result{html: h, statusCode: code, source: "fetch"}
 	}()
 
-	// CDP render
 	go func() {
 		h, e := cdpClient.FetchHTML(ctx, pageURL, waitMs, scroll, maxScrollSteps)
 		if e != nil || len(strings.TrimSpace(h)) < 100 {
@@ -256,7 +231,6 @@ func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Clie
 			}
 			if best.html == "" {
 				best = r
-				// If HTTP fetch won with enough content, use it immediately
 				if r.source == "fetch" && len(r.html) >= 1000 {
 					return best.html, best.statusCode, best.source, nil
 				}
@@ -277,15 +251,6 @@ func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Clie
 	return best.html, best.statusCode, best.source, nil
 }
 
-// HTMLToText strips HTML tags and normalizes whitespace.
-func HTMLToText(htmlContent string) string {
-	text := scriptStyleRe.ReplaceAllString(htmlContent, " ")
-	text = htmlTagRe.ReplaceAllString(text, " ")
-	text = whitespaceRe.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
-}
-
-// Healthy checks if ZenPanda is reachable.
 func (c *CDPClient) Healthy(ctx context.Context) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.zenPandaURL+"/json/health", nil)
 	if err != nil {
@@ -302,4 +267,18 @@ func (c *CDPClient) Healthy(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+type cdpMessage struct {
+	ID        int             `json:"id"`
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *cdpError       `json:"error,omitempty"`
+	SessionID string          `json:"sessionId,omitempty"`
+}
+
+type cdpError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }

@@ -1,4 +1,4 @@
-package main
+package crawl
 
 import (
 	"context"
@@ -36,7 +36,6 @@ func NewRobotsChecker() *RobotsChecker {
 	}
 }
 
-// CanFetch checks whether the given URL is allowed by the site's robots.txt.
 func (rc *RobotsChecker) CanFetch(ctx context.Context, userAgent, rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -153,14 +152,13 @@ func (rc *RobotsChecker) parseRobots(content string) *robotsEntry {
 func (rc *RobotsChecker) isAllowed(entry *robotsEntry, userAgent, path string) bool {
 	ua := strings.ToLower(userAgent)
 
-	// Find most specific matching rule group
 	var matchedRule *robotsRule
 	for i := range entry.rules {
 		r := &entry.rules[i]
 		if r.userAgent == "*" || strings.Contains(ua, r.userAgent) {
 			matchedRule = r
 			if r.userAgent != "*" {
-				break // prefer specific match over wildcard
+				break
 			}
 		}
 	}
@@ -169,7 +167,6 @@ func (rc *RobotsChecker) isAllowed(entry *robotsEntry, userAgent, path string) b
 		return true
 	}
 
-	// Check allow rules first (more specific wins)
 	for _, pattern := range matchedRule.allow {
 		if pathMatches(path, pattern) {
 			return true
