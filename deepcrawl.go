@@ -22,6 +22,7 @@ type CrawlOptions struct {
 	Filters         *FilterChain
 	Scorer          URLScorer
 	ScoreThreshold  float64
+	Robots          *RobotsChecker
 }
 
 type DeepCrawlResult struct {
@@ -113,7 +114,7 @@ func (s *BFSStrategy) Run(ctx context.Context, startURL string, crawlFn CrawlFun
 				continue
 			}
 
-			newLinks := discoverLinks(result, visited, depths, depth+1, opts)
+			newLinks := discoverLinks(ctx, result, visited, depths, depth+1, opts)
 			for _, nl := range newLinks {
 				nextLevel = append(nextLevel, queueItem{url: nl, parentURL: result.URL})
 			}
@@ -303,7 +304,7 @@ func (s *BestFirstStrategy) Run(ctx context.Context, startURL string, crawlFn Cr
 				continue
 			}
 
-			newLinks := discoverLinks(result, visited, depths, result.Depth+1, opts)
+			newLinks := discoverLinks(ctx, result, visited, depths, result.Depth+1, opts)
 			for _, link := range newLinks {
 				linkScore := 0.0
 				if opts.Scorer != nil {
@@ -327,7 +328,7 @@ func (s *BestFirstStrategy) Run(ctx context.Context, startURL string, crawlFn Cr
 
 // --- Shared helpers ---
 
-func discoverLinks(result DeepCrawlResult, visited map[string]bool, depths map[string]int, newDepth int, opts CrawlOptions) []string {
+func discoverLinks(ctx context.Context, result DeepCrawlResult, visited map[string]bool, depths map[string]int, newDepth int, opts CrawlOptions) []string {
 	var discovered []string
 
 	links := result.Links.Internal
@@ -344,6 +345,10 @@ func discoverLinks(result DeepCrawlResult, visited map[string]bool, depths map[s
 		}
 
 		if opts.Filters != nil && !opts.Filters.Apply(normalized) {
+			continue
+		}
+
+		if opts.Robots != nil && !opts.Robots.CanFetch(ctx, "crawl4go", normalized) {
 			continue
 		}
 

@@ -110,10 +110,11 @@ func main() {
 	cdpClient := NewCDPClient(cfg.ZenPandaURL, cfg.MaxConcurrent)
 	httpClient := &http.Client{Timeout: 90 * time.Second}
 	pruner := NewPruningFilter()
+	robots := NewRobotsChecker()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/crawl", crawlHandler(cfg, cdpClient, httpClient, pruner))
-	mux.HandleFunc("/deep-crawl", deepCrawlHandler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/deep-crawl", deepCrawlHandler(cfg, cdpClient, httpClient, pruner, robots))
 	mux.HandleFunc("/health", healthHandler)
 
 	slog.Info("crawl4go starting",
@@ -212,7 +213,7 @@ func crawlSinglePage(ctx context.Context, cfg Config, cdpClient *CDPClient, http
 	}
 }
 
-func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client, pruner *PruningFilter) http.HandlerFunc {
+func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client, pruner *PruningFilter, robots *RobotsChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -285,6 +286,7 @@ func deepCrawlHandler(cfg Config, cdpClient *CDPClient, httpClient *http.Client,
 			Filters:         filters,
 			Scorer:          scorer,
 			ScoreThreshold:  req.ScoreThreshold,
+			Robots:          robots,
 		}
 
 		var strategy CrawlStrategy
