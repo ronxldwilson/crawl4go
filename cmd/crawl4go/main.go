@@ -163,6 +163,16 @@ type DiffRequest struct {
 	NewText string `json:"new_text"`
 }
 
+type RobotsRequest struct {
+	URL       string `json:"url"`
+	UserAgent string `json:"user_agent"`
+}
+
+type RobotsResponse struct {
+	URL     string `json:"url"`
+	Allowed bool   `json:"allowed"`
+}
+
 type BM25Request struct {
 	URL       string  `json:"url"`
 	Query     string  `json:"query"`
@@ -197,6 +207,7 @@ func main() {
 	mux.HandleFunc("/execute", jsExecuteHandler(cfg, cdpClient))
 	mux.HandleFunc("/diff", diffHandler())
 	mux.HandleFunc("/cdx", cdxHandler(httpClient))
+	mux.HandleFunc("/robots", robotsHandler(robots))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
 
 	slog.Info("crawl4go starting",
@@ -208,7 +219,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      corsMiddleware(mux),
+		Handler:      loggingMiddleware(corsMiddleware(mux)),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 15 * time.Minute,
 		IdleTimeout:  60 * time.Second,
@@ -749,6 +760,37 @@ func bm25Handler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Clie
 	}
 }
 
+func robotsHandler(robots *crawl.RobotsChecker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req RobotsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.UserAgent == "" {
+			req.UserAgent = "*"
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		allowed := robots.CanFetch(ctx, req.UserAgent, req.URL)
+		writeJSON(w, http.StatusOK, RobotsResponse{
+			URL:     req.URL,
+			Allowed: allowed,
+		})
+	}
+}
+
 func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -955,6 +997,46 @@ func cdxHandler(httpClient *http.Client) http.HandlerFunc {
 			"url_count": len(records),
 		})
 	}
+}
+
+// --- Logging Middleware ---
+
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	bytes      int
+}
+
+func newResponseWriter(w http.ResponseWriter) *responseWriter {
+	return &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += n
+	return n, err
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := newResponseWriter(w)
+		next.ServeHTTP(rw, r)
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"req_bytes", r.ContentLength,
+			"resp_bytes", rw.bytes,
+			"remote", r.RemoteAddr,
+		)
+	})
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

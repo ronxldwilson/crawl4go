@@ -40,7 +40,7 @@ crawl4go is a Go rewrite of [Crawl4AI](https://github.com/unclecode/crawl4ai) --
 | **Rendering** | HTTP + CDP race (parallel fetch, take fastest), ZenPanda headless Chromium, scroll injection for lazy-loaded content |
 | **Deep Crawling** | 4 strategies: BFS, DFS, Best-First (priority queue), Adaptive (statistical convergence) |
 | **Content Processing** | HTML pruning by text/link density, BM25 relevance scoring with Snowball stemming, HTML-to-Markdown with citation-style links |
-| **Extraction** | CSS selector extraction, JSON-LD / OpenGraph / Twitter Card metadata, table extraction with data-table scoring, media extraction with quality scoring, link previews |
+| **Extraction** | CSS selector, XPath, and regex extraction; JSON-LD / OpenGraph / Twitter Card metadata; table extraction with data-table scoring; media extraction with quality scoring; link previews |
 | **Anti-Bot Detection** | 3-tier detection: structural markers, generic terms, structural integrity (Cloudflare, Akamai, PerimeterX, DataDome, Imperva) |
 | **URL Intelligence** | Robots.txt checking, sitemap discovery, URL scoring (keyword relevance, path depth, freshness), filter chains (pattern, domain, content-type, extension) |
 | **Rate Limiting** | Per-domain adaptive exponential backoff |
@@ -73,7 +73,7 @@ curl http://localhost:8082/health
 
 ## API Reference
 
-crawl4go exposes **7 endpoints**: 4 POST endpoints for crawling and extraction, 1 POST for sitemap discovery, 1 GET for SSL inspection, and 1 GET for health checks.
+crawl4go exposes **17 endpoints** spanning crawling, extraction, content processing, and infrastructure.
 
 ---
 
@@ -453,6 +453,228 @@ curl http://localhost:8082/cert/example.com
   "is_self_signed": false,
   "serial_number": "0A1B2C3D4E5F",
   "signature_algorithm": "SHA256-RSA"
+}
+```
+
+---
+
+### POST `/screenshot`
+
+Capture a viewport or full-page PNG screenshot of a rendered page.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "wait_ms": 2000, "full_page": true}'
+```
+
+**Response:**
+
+```json
+{
+  "url": "https://example.com",
+  "data": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+> `data` is a base64-encoded PNG image.
+
+---
+
+### POST `/chunk`
+
+Chunk page content into segments for LLM context windows.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/chunk \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "strategy": "semantic", "chunk_size": 4000, "prune": true}'
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | string | `"fixed"` | Chunking strategy: `fixed`, `sliding`, `semantic`, `markdown` |
+| `chunk_size` | int | `4000` | Target characters per chunk |
+| `overlap` | int | `0` | Overlap between chunks (fixed/sliding only) |
+
+---
+
+### POST `/bm25`
+
+Score page content chunks by BM25 relevance to a query.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/bm25 \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "query": "machine learning", "threshold": 1.0}'
+```
+
+**Response:**
+
+```json
+{
+  "url": "https://example.com",
+  "query": "machine learning",
+  "total_chunks": 42,
+  "relevant": 8,
+  "chunks": [{"index": 3, "text": "...", "tag_name": "p"}]
+}
+```
+
+---
+
+### POST `/extract-xpath`
+
+Extract structured data using XPath expressions.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/extract-xpath \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "schema": {
+      "base_xpath": "//div[@class=\"product\"]",
+      "fields": [
+        {"name": "title", "xpath": ".//h2", "type": "text"},
+        {"name": "link", "xpath": ".//a/@href", "type": "attribute"}
+      ]
+    }
+  }'
+```
+
+---
+
+### POST `/extract-regex`
+
+Extract data using regex patterns with named capture groups.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/extract-regex \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "schema": {
+      "patterns": [
+        {"name": "emails", "pattern": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}", "group": 0},
+        {"name": "prices", "pattern": "\\$(?P<amount>[0-9]+\\.?[0-9]*)", "group": 0}
+      ]
+    }
+  }'
+```
+
+---
+
+### POST `/execute`
+
+Run arbitrary JavaScript on a rendered page via CDP.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "expression": "document.querySelectorAll(\"a\").length",
+    "await_promise": false,
+    "wait_ms": 1500
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "url": "https://example.com",
+  "result": {"value": 42, "type": "number"}
+}
+```
+
+---
+
+### POST `/diff`
+
+Compare two text documents and compute similarity.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/diff \
+  -H "Content-Type: application/json" \
+  -d '{"old_text": "Hello world\nFoo bar", "new_text": "Hello world\nBaz qux"}'
+```
+
+**Response:**
+
+```json
+{
+  "diff": {
+    "added": ["Baz qux"],
+    "removed": ["Foo bar"],
+    "unchanged": 1,
+    "total_old": 2,
+    "total_new": 2,
+    "similarity": 0.5
+  },
+  "old_hash": "a1b2c3...",
+  "new_hash": "d4e5f6..."
+}
+```
+
+---
+
+### POST `/cdx`
+
+Discover URLs from the Common Crawl CDX index.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/cdx \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com", "max_urls": 500}'
+```
+
+**Response:**
+
+```json
+{
+  "domain": "example.com",
+  "records": [{"url": "https://example.com/page", "timestamp": "20241201120000", "mime_type": "text/html", "status_code": 200}],
+  "url_count": 42
+}
+```
+
+---
+
+### POST `/robots`
+
+Check if a URL is allowed by the site's robots.txt.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8082/robots \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/admin", "user_agent": "crawl4go"}'
+```
+
+**Response:**
+
+```json
+{
+  "url": "https://example.com/admin",
+  "allowed": false
 }
 ```
 
