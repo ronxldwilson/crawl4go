@@ -872,7 +872,7 @@ services:
   tor-proxy:   # ronxldwilson/tor-proxy-pool     :3128  (500 Tor circuits)
 ```
 
-Pre-built images are available on Docker Hub:
+Pre-built multi-arch images (amd64 + arm64) are available on Docker Hub:
 
 - [`ronxldwilson/crawl4go`](https://hub.docker.com/r/ronxldwilson/crawl4go)
 - [`ronxldwilson/zenpanda`](https://hub.docker.com/r/ronxldwilson/zenpanda)
@@ -891,10 +891,16 @@ crawl4go has only 4 external Go module dependencies:
 
 ## Part of the TipStat Sourcer Stack
 
-crawl4go is designed to work alongside:
+crawl4go runs as a sidecar in the SingleLeaf search stack, handling all page rendering and content extraction for deep-search results:
 
-- **[single-leaf](https://github.com/ronxldwilson/single-leaf)** -- Search aggregator and deep search
-- **[zenpanda](https://hub.docker.com/r/ronxldwilson/zenpanda)** -- Headless Chromium container
+```
+Client ──> SingleLeaf ──> SearXNG ──[Tor]──> Search Engines
+                │
+                └──[top results]──> crawl4go ──> ZenPanda (CDP)
+```
+
+- **[SingleLeaf](https://github.com/ronxldwilson/SingleLeaf)** -- Privacy-first search aggregator, uses crawl4go for deep-search rendering
+- **[ZenPanda](https://hub.docker.com/r/ronxldwilson/zenpanda)** -- Headless Chromium container (CDP)
 - **[tor-proxy-pool](https://hub.docker.com/r/ronxldwilson/tor-proxy-pool)** -- Rotating Tor circuit pool
 
 ## License
