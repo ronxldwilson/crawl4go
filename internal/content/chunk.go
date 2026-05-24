@@ -1,9 +1,109 @@
 package content
 
 import (
+	"math"
 	"strings"
 	"unicode/utf8"
 )
+
+// ─── Token-aware document chunking (#81) ────────────────────────────────────
+
+// ChunkConfig controls token-aware document chunking.
+type ChunkConfig struct {
+	MaxTokens int    // maximum estimated tokens per chunk
+	Overlap   int    // number of overlapping tokens between consecutive chunks
+	Separator string // separator used when splitting (default: newline)
+}
+
+// ChunkDocuments splits text into chunks that respect the estimated token
+// limit defined in cfg. Overlap controls how many tokens from the end of one
+// chunk are repeated at the start of the next. The text is first split by
+// cfg.Separator (or "\n" if empty), then segments are greedily accumulated
+// until adding the next segment would exceed MaxTokens.
+func ChunkDocuments(text string, cfg ChunkConfig) []string {
+	if text == "" {
+		return nil
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = 512
+	}
+	sep := cfg.Separator
+	if sep == "" {
+		sep = "\n"
+	}
+
+	segments := strings.Split(text, sep)
+
+	var chunks []string
+	var buf []string
+	bufTokens := 0
+
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		chunks = append(chunks, strings.Join(buf, sep))
+		// Determine overlap: keep trailing segments whose combined tokens ≤ Overlap.
+		if cfg.Overlap > 0 {
+			var keep []string
+			keepTok := 0
+			for i := len(buf) - 1; i >= 0; i-- {
+				t := estimateTokens(buf[i])
+				if keepTok+t > cfg.Overlap {
+					break
+				}
+				keep = append([]string{buf[i]}, keep...)
+				keepTok += t
+			}
+			buf = keep
+			bufTokens = keepTok
+		} else {
+			buf = nil
+			bufTokens = 0
+		}
+	}
+
+	for _, seg := range segments {
+		segTok := estimateTokens(seg)
+		if segTok == 0 && seg == "" {
+			continue
+		}
+		// If a single segment exceeds MaxTokens, emit the current buffer then
+		// emit the segment on its own.
+		if segTok > cfg.MaxTokens {
+			flush()
+			chunks = append(chunks, seg)
+			buf = nil
+			bufTokens = 0
+			continue
+		}
+		if bufTokens+segTok > cfg.MaxTokens && len(buf) > 0 {
+			flush()
+		}
+		buf = append(buf, seg)
+		bufTokens += segTok
+	}
+	flush()
+
+	return chunks
+}
+
+// MergeChunks joins previously split chunks back into a single string using
+// the given separator.
+func MergeChunks(chunks []string, separator string) string {
+	return strings.Join(chunks, separator)
+}
+
+// estimateTokens provides a simple whitespace-based token count estimation.
+// The heuristic is: number of words divided by 0.75 (since one token ≈ 0.75
+// words on average for English text).
+func estimateTokens(text string) int {
+	words := len(strings.Fields(text))
+	if words == 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(words) / 0.75))
+}
 
 // Chunk represents a piece of text with its position and optional metadata.
 type Chunk struct {
