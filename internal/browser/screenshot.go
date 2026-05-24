@@ -4,10 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/ronxldwilson/crawl4go/internal/ua"
 )
 
 func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, waitMs int, fullPage bool) (string, error) {
@@ -16,62 +15,17 @@ func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, wai
 	}
 	defer c.release()
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.browserWSURL(), nil)
+	sess, err := openSession(ctx, c.browserWSURL())
 	if err != nil {
-		return "", fmt.Errorf("ws connect: %w", err)
+		return "", err
 	}
-	defer conn.Close()
+	defer sess.close()
 
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
+	sid := sess.sessionID
 
-	var msgID atomic.Int64
+	configureStealthSession(sess.sendCmd, sid, ua.RandomUA().UserAgent)
 
-	sendCmd := func(method string, params any, sessionID string) (json.RawMessage, error) {
-		id := int(msgID.Add(1))
-		p, _ := json.Marshal(params)
-		msg := cdpMessage{ID: id, Method: method, Params: p, SessionID: sessionID}
-		if err := conn.WriteJSON(msg); err != nil {
-			return nil, err
-		}
-		for {
-			var resp cdpMessage
-			if err := conn.ReadJSON(&resp); err != nil {
-				return nil, err
-			}
-			if resp.ID == id {
-				if resp.Error != nil {
-					return nil, fmt.Errorf("cdp error %d: %s", resp.Error.Code, resp.Error.Message)
-				}
-				return resp.Result, nil
-			}
-		}
-	}
-
-	createResult, err := sendCmd("Target.createTarget", map[string]string{"url": "about:blank"}, "")
-	if err != nil {
-		return "", fmt.Errorf("create target: %w", err)
-	}
-	var created struct {
-		TargetID string `json:"targetId"`
-	}
-	json.Unmarshal(createResult, &created)
-	targetID := created.TargetID
-	defer sendCmd("Target.closeTarget", map[string]string{"targetId": targetID}, "")
-
-	attachResult, err := sendCmd("Target.attachToTarget", map[string]any{"targetId": targetID, "flatten": true}, "")
-	if err != nil {
-		return "", fmt.Errorf("attach target: %w", err)
-	}
-	var attached struct {
-		SessionID string `json:"sessionId"`
-	}
-	json.Unmarshal(attachResult, &attached)
-	sid := attached.SessionID
-
-	if _, err := sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
+	if _, err := sess.sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
 		return "", fmt.Errorf("navigate: %w", err)
 	}
 
@@ -81,7 +35,7 @@ func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, wai
 		return "", ctx.Err()
 	}
 
-	injectBrowserScripts(sendCmd, sid)
+	injectBrowserScripts(sess.sendCmd, sid)
 
 	params := map[string]any{
 		"format":  "png",
@@ -89,7 +43,7 @@ func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, wai
 	}
 
 	if fullPage {
-		result, err := sendCmd("Runtime.evaluate", map[string]any{
+		result, err := sess.sendCmd("Runtime.evaluate", map[string]any{
 			"expression":    "[document.documentElement.scrollWidth, document.documentElement.scrollHeight, window.devicePixelRatio || 1]",
 			"returnByValue": true,
 		}, sid)
@@ -109,7 +63,7 @@ func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, wai
 		}
 	}
 
-	result, err := sendCmd("Page.captureScreenshot", params, sid)
+	result, err := sess.sendCmd("Page.captureScreenshot", params, sid)
 	if err != nil {
 		return "", fmt.Errorf("screenshot: %w", err)
 	}

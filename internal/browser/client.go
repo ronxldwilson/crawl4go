@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,7 +21,14 @@ type CDPClient struct {
 	sem         chan struct{}
 }
 
+// ZenPanda's default cdp_max_connections is 16. The semaphore must not
+// exceed that or ZenPanda will reject connections with MaxThreadsReached.
+const maxZenPandaConnections = 16
+
 func NewCDPClient(zenPandaURL string, maxConcurrent int) *CDPClient {
+	if maxConcurrent > maxZenPandaConnections {
+		maxConcurrent = maxZenPandaConnections
+	}
 	return &CDPClient{
 		zenPandaURL: zenPandaURL,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
@@ -55,63 +61,29 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 	}
 	defer c.release()
 
+	// Dial with a retry if ZenPanda is temporarily unavailable.
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.browserWSURL(), nil)
 	if err != nil {
-		return "", fmt.Errorf("ws connect: %w", err)
-	}
-	defer conn.Close()
-
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
-
-	var msgID atomic.Int64
-
-	sendCmd := func(method string, params any, sessionID string) (json.RawMessage, error) {
-		id := int(msgID.Add(1))
-		p, _ := json.Marshal(params)
-		msg := cdpMessage{ID: id, Method: method, Params: p, SessionID: sessionID}
-		if err := conn.WriteJSON(msg); err != nil {
-			return nil, err
+		if rerr := c.waitForReady(ctx); rerr != nil {
+			return "", fmt.Errorf("ws connect: %w", err)
 		}
-		for {
-			var resp cdpMessage
-			if err := conn.ReadJSON(&resp); err != nil {
-				return nil, err
-			}
-			if resp.ID == id {
-				if resp.Error != nil {
-					return nil, fmt.Errorf("cdp error %d: %s", resp.Error.Code, resp.Error.Message)
-				}
-				return resp.Result, nil
-			}
+		conn, _, err = websocket.DefaultDialer.DialContext(ctx, c.browserWSURL(), nil)
+		if err != nil {
+			return "", fmt.Errorf("ws connect after recovery: %w", err)
 		}
 	}
 
-	createResult, err := sendCmd("Target.createTarget", map[string]string{"url": "about:blank"}, "")
+	sess, err := newCDPSession(ctx, conn)
 	if err != nil {
-		return "", fmt.Errorf("create target: %w", err)
+		return "", err
 	}
-	var created struct {
-		TargetID string `json:"targetId"`
-	}
-	json.Unmarshal(createResult, &created)
-	targetID := created.TargetID
+	defer sess.close()
 
-	defer sendCmd("Target.closeTarget", map[string]string{"targetId": targetID}, "")
+	sid := sess.sessionID
 
-	attachResult, err := sendCmd("Target.attachToTarget", map[string]any{"targetId": targetID, "flatten": true}, "")
-	if err != nil {
-		return "", fmt.Errorf("attach target: %w", err)
-	}
-	var attached struct {
-		SessionID string `json:"sessionId"`
-	}
-	json.Unmarshal(attachResult, &attached)
-	sid := attached.SessionID
+	configureStealthSession(sess.sendCmd, sid, ua.RandomUA().UserAgent)
 
-	if _, err := sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
+	if _, err := sess.sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
 		return "", fmt.Errorf("navigate: %w", err)
 	}
 
@@ -121,13 +93,13 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 		return "", ctx.Err()
 	}
 
-	injectBrowserScripts(sendCmd, sid)
+	injectBrowserScripts(sess.sendCmd, sid)
 
 	if scroll {
-		scrollPage(sendCmd, sid, maxScrollSteps)
+		scrollPage(sess.sendCmd, sid, maxScrollSteps)
 	}
 
-	result, err := sendCmd("Runtime.evaluate", map[string]any{
+	result, err := sess.sendCmd("Runtime.evaluate", map[string]any{
 		"expression":    "document.documentElement ? document.documentElement.outerHTML : ''",
 		"returnByValue": true,
 	}, sid)
@@ -251,8 +223,27 @@ func RenderPage(ctx context.Context, cdpClient *CDPClient, httpClient *http.Clie
 	return best.html, best.statusCode, best.source, nil
 }
 
+func (c *CDPClient) waitForReady(ctx context.Context) error {
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 10 * time.Second
+	for {
+		if c.Healthy(ctx) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
 func (c *CDPClient) Healthy(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.zenPandaURL+"/json/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.zenPandaURL+"/json/version", nil)
 	if err != nil {
 		return false
 	}
@@ -269,16 +260,3 @@ func (c *CDPClient) Healthy(ctx context.Context) bool {
 	return true
 }
 
-type cdpMessage struct {
-	ID        int             `json:"id"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     *cdpError       `json:"error,omitempty"`
-	SessionID string          `json:"sessionId,omitempty"`
-}
-
-type cdpError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}

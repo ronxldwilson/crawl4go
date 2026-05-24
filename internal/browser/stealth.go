@@ -1,33 +1,26 @@
 package browser
 
-func StealthFlags() []string {
-	return []string{
-		"--disable-blink-features=AutomationControlled",
-		"--disable-features=IsolateOrigins,site-per-process,TranslateUI,OptimizationHints,MediaRouter,DialMediaRouteProvider",
-		"--disable-infobars",
-		"--disable-dev-shm-usage",
-		"--disable-background-networking",
-		"--disable-background-timer-throttling",
-		"--disable-backgrounding-occluded-windows",
-		"--disable-renderer-backgrounding",
-		"--disable-ipc-flooding-protection",
-		"--disable-client-side-phishing-detection",
-		"--disable-default-apps",
-		"--disable-extensions",
-		"--disable-hang-monitor",
-		"--disable-popup-blocking",
-		"--disable-prompt-on-repost",
-		"--disable-sync",
-		"--disable-component-update",
-		"--disable-domain-reliability",
-		"--no-sandbox",
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--ignore-certificate-errors",
-		"--force-color-profile=srgb",
-		"--metrics-recording-only",
-		"--password-store=basic",
-		"--use-mock-keychain",
-		"--mute-audio",
+import "log/slog"
+
+func configureStealthSession(sendCmd sendCmdFunc, sessionID string, userAgent string) {
+	// Set realistic user agent via CDP
+	if userAgent != "" {
+		_, err := sendCmd("Emulation.setUserAgentOverride", map[string]any{
+			"userAgent":      userAgent,
+			"acceptLanguage": "en-US,en;q=0.9",
+		}, sessionID)
+		if err != nil {
+			slog.Debug("stealth: user agent override failed", "error", err)
+		}
+	}
+
+	// Set extra headers to match a real browser
+	_, err := sendCmd("Network.setExtraHTTPHeaders", map[string]any{
+		"headers": map[string]string{
+			"Accept-Language": "en-US,en;q=0.9",
+		},
+	}, sessionID)
+	if err != nil {
+		slog.Debug("stealth: extra headers failed", "error", err)
 	}
 }
