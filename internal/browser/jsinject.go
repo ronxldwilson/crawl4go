@@ -8,10 +8,14 @@ func injectBrowserScripts(sendCmd sendCmdFunc, sessionID string) {
 		js      string
 		isAsync bool
 	}{
+		{"shadow_dom_force_open", jsShadowDOMForceOpen, false},
 		{"navigator_override", jsNavigatorOverride, false},
+		{"csp_compliant_wait", jsCSPCompliantWait, false},
 		{"remove_consent_popups", jsRemoveConsentPopups, true},
 		{"remove_overlays", jsRemoveOverlays, true},
 		{"flatten_shadow_dom", jsFlattenShadowDOM, false},
+		{"wait_for_animations", jsWaitForAnimations, true},
+		{"process_iframes", jsProcessIframes, true},
 		{"update_image_dimensions", jsUpdateImageDimensions, false},
 	}
 
@@ -198,6 +202,71 @@ const jsFlattenShadowDOM = `(() => {
     };
     return serialize(document.documentElement);
 })()`
+
+const jsShadowDOMForceOpen = `
+(() => {
+    const orig = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function(init) {
+        return orig.call(this, Object.assign({}, init, { mode: "open" }));
+    };
+})()
+`
+
+const jsCSPCompliantWait = `
+(() => {
+    window.__crawl4go_waitFor = function(selectorOrFn, timeoutMs) {
+        timeoutMs = timeoutMs || 10000;
+        return new Promise(function(resolve, reject) {
+            var start = Date.now();
+            var check = function() {
+                var el = typeof selectorOrFn === "string" ? document.querySelector(selectorOrFn) : null;
+                if (el || (Date.now() - start > timeoutMs)) {
+                    resolve(!!el);
+                } else {
+                    requestAnimationFrame(check);
+                }
+            };
+            check();
+        });
+    };
+})()
+`
+
+const jsWaitForAnimations = `async () => {
+    await new Promise(resolve => {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(resolve);
+        });
+    });
+    const animations = document.getAnimations ? document.getAnimations() : [];
+    const pending = animations.filter(a => a.playState === "running" && a.effect);
+    if (pending.length > 0) {
+        await Promise.race([
+            Promise.allSettled(pending.map(a => a.finished)),
+            new Promise(r => setTimeout(r, 2000))
+        ]);
+    }
+}`
+
+const jsProcessIframes = `async () => {
+    const iframes = document.querySelectorAll("iframe");
+    for (const iframe of iframes) {
+        try {
+            const doc = iframe.contentDocument || iframe.contentWindow.document;
+            if (!doc || !doc.body) continue;
+            const content = doc.body.innerHTML;
+            if (content && content.trim().length > 50) {
+                const div = document.createElement("div");
+                div.setAttribute("data-iframe-src", iframe.src || "");
+                div.innerHTML = content;
+                iframe.parentNode.insertBefore(div, iframe);
+                iframe.remove();
+            }
+        } catch(e) {
+            // Cross-origin — skip silently
+        }
+    }
+}`
 
 const jsUpdateImageDimensions = `(() => {
     return new Promise((resolve) => {

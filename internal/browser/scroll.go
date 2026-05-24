@@ -10,9 +10,15 @@ import (
 type sendCmdFunc func(method string, params any, sessionID string) (json.RawMessage, error)
 
 func scrollPage(sendCmd sendCmdFunc, sessionID string, maxSteps int) {
+	scrollPageWithTimeout(sendCmd, sessionID, maxSteps, 10*time.Second)
+}
+
+func scrollPageWithTimeout(sendCmd sendCmdFunc, sessionID string, maxSteps int, timeout time.Duration) {
 	if maxSteps <= 0 {
 		maxSteps = 10
 	}
+
+	deadline := time.Now().Add(timeout)
 
 	evalJS := func(expr string) (float64, error) {
 		result, err := sendCmd("Runtime.evaluate", map[string]any{
@@ -42,6 +48,11 @@ func scrollPage(sendCmd sendCmdFunc, sessionID string, maxSteps int) {
 	noChangeCount := 0
 
 	for step := 0; step < maxSteps; step++ {
+		if time.Now().After(deadline) {
+			slog.Debug("scroll timeout reached", "step", step, "max_steps", maxSteps)
+			break
+		}
+
 		scrollHeight, err := evalJS("document.body.scrollHeight")
 		if err != nil {
 			break
@@ -70,7 +81,16 @@ func scrollPage(sendCmd sendCmdFunc, sessionID string, maxSteps int) {
 			break
 		}
 
-		time.Sleep(300 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			slog.Debug("scroll timeout reached after scroll step", "step", step)
+			break
+		}
+		wait := 300 * time.Millisecond
+		if wait > remaining {
+			wait = remaining
+		}
+		time.Sleep(wait)
 	}
 
 	sendCmd("Runtime.evaluate", map[string]any{
