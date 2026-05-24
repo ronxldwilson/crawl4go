@@ -2,6 +2,7 @@ package content
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"regexp"
 	"strings"
@@ -185,4 +186,132 @@ func nodeLinkTextLength(n *html.Node) int {
 		total += nodeLinkTextLength(c)
 	}
 	return total
+}
+
+// ---------------------------------------------------------------------------
+// PruningConfig-based content filter (#39)
+// ---------------------------------------------------------------------------
+
+// PruningConfig holds parameters for the configurable pruning content filter.
+type PruningConfig struct {
+	MinTextLength      int      `json:"min_text_length"`
+	MinWordCount       int      `json:"min_word_count"`
+	MaxLinkDensity     float64  `json:"max_link_density"`
+	BoilerplatePatterns []string `json:"boilerplate_patterns"`
+}
+
+// DefaultPruningConfig returns a PruningConfig with sensible defaults.
+func DefaultPruningConfig() PruningConfig {
+	return PruningConfig{
+		MinTextLength:  25,
+		MinWordCount:   3,
+		MaxLinkDensity: 0.7,
+		BoilerplatePatterns: []string{
+			"cookie", "privacy policy", "terms of service",
+			"subscribe", "newsletter", "sign up", "log in",
+			"advertisement", "sponsored", "all rights reserved",
+			"copyright", "follow us",
+		},
+	}
+}
+
+// ConfigurablePruningFilter implements ContentFilter using configurable
+// heuristics that score DOM-like text blocks by text length, word count,
+// link density, and boilerplate pattern presence.
+type ConfigurablePruningFilter struct {
+	Config PruningConfig
+}
+
+// NewConfigurablePruningFilter creates a filter with the given config.
+func NewConfigurablePruningFilter(cfg PruningConfig) *ConfigurablePruningFilter {
+	return &ConfigurablePruningFilter{Config: cfg}
+}
+
+func (f *ConfigurablePruningFilter) Name() string { return "configurable-pruning" }
+
+func (f *ConfigurablePruningFilter) Filter(_ context.Context, blocks []string, _ string) ([]FilteredBlock, error) {
+	results := make([]FilteredBlock, len(blocks))
+	for i, block := range blocks {
+		score := f.scoreBlock(block)
+		results[i] = FilteredBlock{
+			Content: block,
+			Score:   score,
+			Index:   i,
+			Kept:    score > 0,
+		}
+	}
+	return results, nil
+}
+
+// scoreBlock computes a relevance score for a text block.
+// Returns 0 if the block fails hard thresholds, otherwise a positive score.
+func (f *ConfigurablePruningFilter) scoreBlock(block string) float64 {
+	text := HTMLToText(block)
+	textLen := len(text)
+	words := strings.Fields(text)
+	wordCount := len(words)
+
+	// Hard threshold: minimum text length.
+	if textLen < f.Config.MinTextLength {
+		return 0
+	}
+	// Hard threshold: minimum word count.
+	if wordCount < f.Config.MinWordCount {
+		return 0
+	}
+
+	var score float64
+
+	// Text length component (log-scaled, max 0.3).
+	lenScore := math.Log(float64(textLen)+1) / 20.0
+	if lenScore > 0.3 {
+		lenScore = 0.3
+	}
+	score += lenScore
+
+	// Word count component (max 0.2).
+	wcScore := float64(wordCount) / 100.0
+	if wcScore > 0.2 {
+		wcScore = 0.2
+	}
+	score += wcScore
+
+	// Link density penalty.
+	linkTextLen := countLinkText(block)
+	linkDensity := 0.0
+	if textLen > 0 {
+		linkDensity = float64(linkTextLen) / float64(textLen)
+	}
+	if linkDensity > f.Config.MaxLinkDensity {
+		return 0
+	}
+	// Reward low link density (max 0.3).
+	score += (1.0 - linkDensity) * 0.3
+
+	// Boilerplate pattern penalty.
+	lower := strings.ToLower(text)
+	boilerplateHits := 0
+	for _, pat := range f.Config.BoilerplatePatterns {
+		if strings.Contains(lower, strings.ToLower(pat)) {
+			boilerplateHits++
+		}
+	}
+	if boilerplateHits > 0 {
+		penalty := float64(boilerplateHits) * 0.15
+		score -= penalty
+	}
+
+	if score < 0 {
+		score = 0
+	}
+	return score
+}
+
+// countLinkText counts the total length of text inside <a> tags in an HTML block.
+func countLinkText(block string) int {
+	doc, err := html.Parse(strings.NewReader(block))
+	if err != nil {
+		return 0
+	}
+	return nodeLinkTextLength(doc)
 }
