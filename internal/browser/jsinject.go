@@ -16,6 +16,8 @@ func injectBrowserScripts(sendCmd sendCmdFunc, sessionID string) {
 		{"flatten_shadow_dom", jsFlattenShadowDOM, false},
 		{"wait_for_animations", jsWaitForAnimations, true},
 		{"process_iframes", jsProcessIframes, true},
+		{"virtual_scroll", jsVirtualScroll, true},
+		{"freeze_element_dimensions", jsFreezeElementDimensions, false},
 		{"update_image_dimensions", jsUpdateImageDimensions, false},
 	}
 
@@ -286,3 +288,64 @@ const jsUpdateImageDimensions = `(() => {
         resolve();
     });
 })()`
+
+const jsFreezeElementDimensions = `
+(() => {
+    const elements = document.querySelectorAll('img, video, iframe, canvas, svg');
+    elements.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+            el.style.width = rect.width + 'px';
+            el.style.height = rect.height + 'px';
+            el.style.minWidth = rect.width + 'px';
+            el.style.minHeight = rect.height + 'px';
+            el.style.maxWidth = rect.width + 'px';
+            el.style.maxHeight = rect.height + 'px';
+        }
+    });
+})()
+`
+
+const jsVirtualScroll = `async () => {
+    const containers = document.querySelectorAll('[class*="virtual"], [class*="infinite"], [data-virtualized], [class*="recycler"]');
+    for (const container of containers) {
+        const maxScrolls = 20;
+        let prevHeight = 0;
+        let noChange = 0;
+        for (let i = 0; i < maxScrolls; i++) {
+            container.scrollTop = container.scrollHeight;
+            await new Promise(r => setTimeout(r, 500));
+            if (container.scrollHeight === prevHeight) {
+                noChange++;
+                if (noChange >= 3) break;
+            } else {
+                noChange = 0;
+            }
+            prevHeight = container.scrollHeight;
+        }
+        container.scrollTop = 0;
+    }
+}`
+
+const jsGoogleImagesExtractor = `
+(() => {
+    try {
+        const results = [];
+        const items = document.querySelectorAll('[data-id][data-ri]');
+        items.forEach(item => {
+            const img = item.querySelector('img[src^="http"]') || item.querySelector('img[data-src^="http"]');
+            const link = item.querySelector('a[href^="http"]');
+            if (img) {
+                results.push({
+                    src: img.src || img.dataset.src || '',
+                    alt: img.alt || '',
+                    width: img.naturalWidth || 0,
+                    height: img.naturalHeight || 0,
+                    link: link ? link.href : ''
+                });
+            }
+        });
+        return JSON.stringify(results);
+    } catch(e) { return '[]'; }
+})()
+`
