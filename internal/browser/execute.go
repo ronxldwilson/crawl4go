@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/ronxldwilson/crawl4go/internal/ua"
 )
@@ -34,11 +33,7 @@ func (c *CDPClient) ExecuteJS(ctx context.Context, targetURL string, waitMs int,
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 
-	select {
-	case <-time.After(time.Duration(waitMs) * time.Millisecond):
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	waitForPageReady(sess, waitMs)
 
 	injectBrowserScripts(sess.sendCmd, sid)
 

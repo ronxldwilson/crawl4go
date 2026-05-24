@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/ronxldwilson/crawl4go/internal/ua"
 )
@@ -43,12 +42,7 @@ func (c *CDPClient) CollectMetrics(ctx context.Context, targetURL string, waitMs
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 
-	// Wait for the page to settle.
-	select {
-	case <-time.After(time.Duration(waitMs) * time.Millisecond):
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	waitForPageReady(sess, waitMs)
 
 	// Single JS expression that collects all metrics at once.
 	const metricsJS = `(function() {

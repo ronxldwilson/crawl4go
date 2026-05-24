@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/ronxldwilson/crawl4go/internal/ua"
 )
@@ -29,35 +28,29 @@ func (c *CDPClient) CaptureScreenshot(ctx context.Context, targetURL string, wai
 		return "", fmt.Errorf("navigate: %w", err)
 	}
 
-	select {
-	case <-time.After(time.Duration(waitMs) * time.Millisecond):
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	waitForPageReady(sess, waitMs)
 
 	injectBrowserScripts(sess.sendCmd, sid)
 
 	params := map[string]any{
-		"format":  "png",
-		"quality": 80,
+		"format": "png",
 	}
 
 	if fullPage {
-		result, err := sess.sendCmd("Runtime.evaluate", map[string]any{
-			"expression":    "[document.documentElement.scrollWidth, document.documentElement.scrollHeight, window.devicePixelRatio || 1]",
-			"returnByValue": true,
-		}, sid)
+		metricsResult, err := sess.sendCmd("Page.getLayoutMetrics", nil, sid)
 		if err == nil {
-			var evalResult struct {
-				Result struct {
-					Value []float64 `json:"value"`
-				} `json:"result"`
+			var metrics struct {
+				ContentSize struct {
+					Width  float64 `json:"width"`
+					Height float64 `json:"height"`
+				} `json:"contentSize"`
 			}
-			if json.Unmarshal(result, &evalResult) == nil && len(evalResult.Result.Value) == 3 {
-				w := evalResult.Result.Value[0]
-				h := evalResult.Result.Value[1]
+			if json.Unmarshal(metricsResult, &metrics) == nil && metrics.ContentSize.Width > 0 {
 				params["clip"] = map[string]any{
-					"x": 0, "y": 0, "width": w, "height": h, "scale": 1,
+					"x": 0, "y": 0,
+					"width":  metrics.ContentSize.Width,
+					"height": metrics.ContentSize.Height,
+					"scale":  1,
 				}
 			}
 		}

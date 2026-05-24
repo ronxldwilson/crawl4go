@@ -87,11 +87,7 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 		return "", fmt.Errorf("navigate: %w", err)
 	}
 
-	select {
-	case <-time.After(time.Duration(waitMs) * time.Millisecond):
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	waitForPageReady(sess, waitMs)
 
 	injectBrowserScripts(sess.sendCmd, sid)
 
@@ -99,6 +95,81 @@ func (c *CDPClient) FetchHTML(ctx context.Context, targetURL string, waitMs int,
 		scrollPage(sess.sendCmd, sid, maxScrollSteps)
 	}
 
+	result, err := sess.sendCmd("Runtime.evaluate", map[string]any{
+		"expression":    "document.documentElement ? document.documentElement.outerHTML : ''",
+		"returnByValue": true,
+	}, sid)
+	if err != nil {
+		return "", fmt.Errorf("evaluate: %w", err)
+	}
+
+	var evalResult struct {
+		Result struct {
+			Value string `json:"value"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(result, &evalResult); err != nil {
+		return "", err
+	}
+
+	return evalResult.Result.Value, nil
+}
+
+// FetchMarkdown navigates to targetURL and returns page content as markdown.
+// It first tries ZenPanda's native LP.getMarkdown CDP command which returns
+// clean markdown directly from the DOM. If that command is unavailable (e.g.
+// non-ZenPanda endpoint) or returns empty content, it falls back to FetchHTML.
+func (c *CDPClient) FetchMarkdown(ctx context.Context, targetURL string, waitMs int, scroll bool, maxScrollSteps int) (string, error) {
+	if err := c.acquire(ctx); err != nil {
+		return "", err
+	}
+	defer c.release()
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.browserWSURL(), nil)
+	if err != nil {
+		if rerr := c.waitForReady(ctx); rerr != nil {
+			return "", fmt.Errorf("ws connect: %w", err)
+		}
+		conn, _, err = websocket.DefaultDialer.DialContext(ctx, c.browserWSURL(), nil)
+		if err != nil {
+			return "", fmt.Errorf("ws connect after recovery: %w", err)
+		}
+	}
+
+	sess, err := newCDPSession(ctx, conn)
+	if err != nil {
+		return "", err
+	}
+	defer sess.close()
+
+	sid := sess.sessionID
+
+	configureStealthSession(sess.sendCmd, sid, ua.RandomUA().UserAgent)
+
+	if _, err := sess.sendCmd("Page.navigate", map[string]string{"url": targetURL}, sid); err != nil {
+		return "", fmt.Errorf("navigate: %w", err)
+	}
+
+	waitForPageReady(sess, waitMs)
+
+	injectBrowserScripts(sess.sendCmd, sid)
+
+	if scroll {
+		scrollPage(sess.sendCmd, sid, maxScrollSteps)
+	}
+
+	// Try ZenPanda's native LP.getMarkdown first — no JS eval overhead.
+	lpResult, lpErr := sess.sendCmd("LP.getMarkdown", nil, sid)
+	if lpErr == nil {
+		var md struct {
+			Result string `json:"result"`
+		}
+		if json.Unmarshal(lpResult, &md) == nil && len(md.Result) > 0 {
+			return md.Result, nil
+		}
+	}
+
+	// Fall back to standard outerHTML extraction.
 	result, err := sess.sendCmd("Runtime.evaluate", map[string]any{
 		"expression":    "document.documentElement ? document.documentElement.outerHTML : ''",
 		"returnByValue": true,
