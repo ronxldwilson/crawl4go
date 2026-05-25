@@ -300,6 +300,9 @@ scripts/
 *.ldb
 MEMORY.md
 
+# Benchmark results
+benchmark/results/
+
 # Handoff files
 HANDOFF-*.md
 crawl4go.exe
