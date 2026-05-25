@@ -1,0 +1,27 @@
+services:
+  # --- crawl4go stack ---
+  crawl4go:
+    image: ronxldwilson/crawl4go:latest
+    ports:
+      - "8082:8082"
+    environment:
+      - CRAWL4GO_PORT=8082
+      - ZENPANDA_URL=http://zenpanda:9222
+      - TOR_PROXY_URL=http://tor-proxy:3128
+      - DEFAULT_WAIT_MS=1500
+      - MAX_CONCURRENT=4
+      - REQUEST_TIMEOUT_MS=30000
+    depends_on:
+      zenpanda:
+        condition: service_started
+
+  zenpanda:
+    image: ronxldwilson/zenpanda:latest
+
+  # --- crawl4ai stack ---
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    ports:
+      - "11235:11235"
+    environment:
+      - CRAWL4AI_API_TOKEN=benchmark-token

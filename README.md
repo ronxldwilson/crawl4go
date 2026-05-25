@@ -889,6 +889,58 @@ crawl4go has only 4 external Go module dependencies:
 | [`html-to-markdown/v2`](https://github.com/JohannesKaufmann/html-to-markdown) | HTML-to-Markdown conversion |
 | [`snowball`](https://github.com/kljensen/snowball) | Snowball stemming for BM25 scoring |
 
+## Benchmarks
+
+crawl4go vs upstream [Crawl4AI](https://github.com/unclecode/crawl4ai) (Python), tested via Docker on Apple Silicon (M-series, 4 GB Docker RAM). Both services crawl the same URLs through their respective HTTP APIs.
+
+### Infrastructure
+
+| Metric | crawl4go + ZenPanda | Crawl4AI | Ratio |
+|--------|-------------------|----------|-------|
+| **Docker image** | 26 MB + 323 MB = **349 MB** | **9.35 GB** | 27x smaller |
+| **Cold start** | 326 ms | 3,125 ms | 9.6x faster |
+| **Idle memory** | 2.6 + 3.6 = **6.1 MiB** | **575.8 MiB** | 94x less |
+| **Load memory** | 10.8 + 14.8 = **25.6 MiB** | **822.8 MiB** | 32x less |
+
+### Real-Site Crawl Latency
+
+5 iterations per site, `output=markdown`, `prune=true`, `wait_ms=500`.
+
+| Site | crawl4go (avg) | Crawl4AI (avg) | Speedup |
+|------|---------------|----------------|---------|
+| Hacker News | 0.44s | 0.72s | **1.6x** |
+| Wikipedia | 0.16s | 0.41s | **2.6x** |
+| BBC News | 0.08s | 0.48s | **6.0x** |
+| GitHub (repo page) | 0.28s | 1.04s | **3.7x** |
+| MDN Web Docs | 0.06s | 0.37s | **6.2x** |
+| Stack Overflow | 0.24s | 0.86s | **3.6x** |
+| Amazon (product) | 0.66s | 2.01s | **3.0x** |
+| Reddit | 1.57s | 0.54s | 0.3x |
+
+crawl4go wins 7 of 8 real-site benchmarks. Reddit is the exception -- old.reddit.com returns different content to different user agents and crawl4go's HTTP+CDP race adds overhead on that specific site.
+
+### Content Quality (Wikipedia — Web Scraping article)
+
+| Metric | crawl4go | Crawl4AI |
+|--------|---------|----------|
+| Markdown content | 17,730 chars | 5 chars |
+| Links extracted | 318 | 319 |
+| Tables extracted | 3 | N/A |
+
+### Pure Compute
+
+The `/diff` endpoint (no network, pure text processing) averages **1.6 ms** per request.
+
+### Reproduce
+
+```bash
+cd benchmark
+docker compose up -d
+bash bench.sh       # infrastructure benchmarks
+bash bench_real.sh  # real-site benchmarks
+docker compose down
+```
+
 ## Part of the TipStat Sourcer Stack
 
 crawl4go runs as a sidecar in the SingleLeaf search stack, handling all page rendering and content extraction for deep-search results:
