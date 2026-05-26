@@ -16,26 +16,44 @@ import (
 	"github.com/ronxldwilson/crawl4go/internal/browser"
 	"github.com/ronxldwilson/crawl4go/internal/content"
 	"github.com/ronxldwilson/crawl4go/internal/crawl"
+	"github.com/ronxldwilson/crawl4go/internal/llm"
+	"github.com/ronxldwilson/crawl4go/internal/proxy"
 )
 
 type Config struct {
 	Port             string
 	ZenPandaURL      string
 	TorProxyURL      string
+	ProxyURLs        []string // comma-separated list parsed from PROXY_URLS
 	DefaultWaitMs    int
 	MaxConcurrent    int
 	RequestTimeoutMs int
+	LLMProvider      string
+	LLMModel         string
+	LLMAPIKey        string
 }
 
 func loadConfig() Config {
-	return Config{
+	cfg := Config{
 		Port:             getEnv("CRAWL4GO_PORT", "8082"),
 		ZenPandaURL:      getEnv("ZENPANDA_URL", "http://zenpanda:9222"),
 		TorProxyURL:      getEnv("TOR_PROXY_URL", "http://tor-proxy:3128"),
 		DefaultWaitMs:    getEnvInt("DEFAULT_WAIT_MS", 1500),
 		MaxConcurrent:    getEnvInt("MAX_CONCURRENT", 4),
 		RequestTimeoutMs: getEnvInt("REQUEST_TIMEOUT_MS", 30000),
+		LLMProvider:      getEnv("LLM_PROVIDER", "openai"),
+		LLMModel:         getEnv("LLM_MODEL", "gpt-4o-mini"),
+		LLMAPIKey:        getEnv("LLM_API_KEY", ""),
 	}
+	if v := os.Getenv("PROXY_URLS"); v != "" {
+		for _, u := range strings.Split(v, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				cfg.ProxyURLs = append(cfg.ProxyURLs, u)
+			}
+		}
+	}
+	return cfg
 }
 
 func getEnv(key, fallback string) string {
@@ -184,6 +202,91 @@ type BM25Request struct {
 	Proxy     bool    `json:"proxy"`
 }
 
+type LLMExtractRequest struct {
+	URL       string `json:"url"`
+	Provider  string `json:"provider"`   // openai, anthropic, ollama
+	Model     string `json:"model"`
+	APIKey    string `json:"api_key"`
+	Schema    string `json:"schema,omitempty"` // JSON schema for structured output
+	ChunkSize int    `json:"chunk_size"`
+	WaitMs    int    `json:"wait_ms"`
+	Proxy     bool   `json:"proxy"`
+}
+
+type CosineExtractRequest struct {
+	URL       string  `json:"url"`
+	Provider  string  `json:"provider"` // openai for embeddings
+	APIKey    string  `json:"api_key"`
+	Model     string  `json:"model"` // embedding model
+	Threshold float64 `json:"threshold"`
+	TopN      int     `json:"top_n"`
+	WaitMs    int     `json:"wait_ms"`
+	Proxy     bool    `json:"proxy"`
+}
+
+type PDFExtractRequest struct {
+	Path     string `json:"path"`      // local file path
+	MaxPages int    `json:"max_pages"`
+}
+
+type BatchCrawlRequest struct {
+	URLs          []string `json:"urls"`
+	MaxConcurrent int      `json:"max_concurrent"`
+	TimeoutMs     int      `json:"timeout_ms"`
+	MaxRetries    int      `json:"max_retries"`
+	Output        string   `json:"output"`
+	Prune         bool     `json:"prune"`
+	WaitMs        int      `json:"wait_ms"`
+}
+
+type FilterRequest struct {
+	URL      string   `json:"url"`
+	Query    string   `json:"query"`
+	Filters  []string `json:"filters"` // "bm25", "pruning", "llm"
+	Provider string   `json:"provider,omitempty"`
+	APIKey   string   `json:"api_key,omitempty"`
+	Model    string   `json:"model,omitempty"`
+	WaitMs   int      `json:"wait_ms"`
+	Proxy    bool     `json:"proxy"`
+}
+
+// --- LLM adapters ---
+
+// llmAdapter adapts llm.Client to satisfy content.LLMProvider / content.LLMCompleter.
+type llmAdapter struct {
+	client *llm.Client
+}
+
+func (a *llmAdapter) Complete(ctx context.Context, prompt string) (string, error) {
+	resp, err := a.client.Complete(ctx, llm.CompletionRequest{
+		Messages: []llm.Message{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+// embedAdapter adapts llm.Client to satisfy content.Embedder.
+type embedAdapter struct {
+	client *llm.Client
+	model  string
+}
+
+func (a *embedAdapter) Embed(ctx context.Context, text string) ([]float64, error) {
+	resp, err := a.client.Embed(ctx, llm.EmbeddingRequest{
+		Input: []string{text},
+		Model: a.model,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Embeddings) == 0 {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+	return resp.Embeddings[0], nil
+}
+
 func main() {
 	cfg := loadConfig()
 
@@ -192,6 +295,20 @@ func main() {
 	pruner := content.NewPruningFilter()
 	robots := crawl.NewRobotsChecker()
 	rateLimiter := crawl.NewRateLimiter()
+
+	// Build proxy pool from PROXY_URLS, or fall back to single TorProxyURL.
+	var proxyPool *proxy.Pool
+	if len(cfg.ProxyURLs) > 0 {
+		proxyCfgs := make([]proxy.Config, len(cfg.ProxyURLs))
+		for i, u := range cfg.ProxyURLs {
+			proxyCfgs[i] = proxy.Config{URL: u}
+		}
+		proxyPool = proxy.NewPool(proxyCfgs)
+	} else if cfg.TorProxyURL != "" {
+		proxyPool = proxy.NewSinglePool(cfg.TorProxyURL)
+	} else {
+		proxyPool = proxy.NewPool(nil)
+	}
 
 	mux := http.NewServeMux()
 
@@ -213,12 +330,21 @@ func main() {
 	mux.HandleFunc("/analyze", analyzeHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/perf", perfHandler(cfg, cdpClient))
 	mux.HandleFunc("/health", healthHandler(cdpClient))
+	mux.HandleFunc("/extract-llm", llmExtractHandler(cfg, cdpClient, httpClient, proxyPool))
+	mux.HandleFunc("/extract-cosine", cosineExtractHandler(cfg, cdpClient, httpClient, proxyPool))
+	mux.HandleFunc("/pdf", pdfExtractHandler())
+	mux.HandleFunc("/batch", batchCrawlHandler(cfg, cdpClient, httpClient, pruner, rateLimiter))
+	mux.HandleFunc("/deep-crawl-stream", deepCrawlStreamHandler(cfg, cdpClient, httpClient, pruner, robots, rateLimiter))
+	mux.HandleFunc("/filter", filterHandler(cfg, cdpClient, httpClient, pruner, proxyPool))
 
 	slog.Info("crawl4go starting",
 		"port", cfg.Port,
 		"zenpanda", cfg.ZenPandaURL,
 		"tor_proxy", cfg.TorProxyURL,
+		"proxy_pool_size", proxyPool.Size(),
 		"max_concurrent", cfg.MaxConcurrent,
+		"llm_provider", cfg.LLMProvider,
+		"llm_model", cfg.LLMModel,
 	)
 
 	srv := &http.Server{
@@ -1142,6 +1268,487 @@ func perfHandler(cfg Config, cdpClient *browser.CDPClient) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"url":     req.URL,
 			"metrics": metrics,
+		})
+	}
+}
+
+// proxyURLFromPool returns the next proxy URL from the pool, or empty string if pool is empty.
+func proxyURLFromPool(pool *proxy.Pool, useProxy bool) string {
+	if !useProxy {
+		return ""
+	}
+	cfg := pool.Next()
+	return cfg.URL
+}
+
+func llmExtractHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, proxyPool *proxy.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req LLMExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Provider == "" {
+			req.Provider = cfg.LLMProvider
+		}
+		if req.Model == "" {
+			req.Model = cfg.LLMModel
+		}
+		if req.APIKey == "" {
+			req.APIKey = cfg.LLMAPIKey
+		}
+		if req.ChunkSize <= 0 {
+			req.ChunkSize = 4000
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := proxyURLFromPool(proxyPool, req.Proxy)
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		llmClient := llm.NewClient(llm.Config{
+			Provider:   req.Provider,
+			Model:      req.Model,
+			APIKey:     req.APIKey,
+			MaxTokens:  4096,
+			MaxRetries: 3,
+			Timeout:    60 * time.Second,
+		})
+
+		adapter := &llmAdapter{client: llmClient}
+		strategy := content.NewLLMExtractionStrategy(adapter)
+		strategy.ChunkSize = req.ChunkSize
+		strategy.Schema = req.Schema
+
+		results, err := strategy.Extract(ctx, htmlContent, content.ExtractionConfig{})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "llm extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":            req.URL,
+			"results":        results,
+			"input_tokens":   strategy.InputTokens,
+			"output_tokens":  strategy.OutputTokens,
+			"total_tokens":   strategy.InputTokens + strategy.OutputTokens,
+		})
+	}
+}
+
+func cosineExtractHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, proxyPool *proxy.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req CosineExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Provider == "" {
+			req.Provider = cfg.LLMProvider
+		}
+		if req.APIKey == "" {
+			req.APIKey = cfg.LLMAPIKey
+		}
+		if req.Threshold <= 0 {
+			req.Threshold = 0.6
+		}
+		if req.TopN <= 0 {
+			req.TopN = 5
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := proxyURLFromPool(proxyPool, req.Proxy)
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		llmClient := llm.NewClient(llm.Config{
+			Provider:   req.Provider,
+			APIKey:     req.APIKey,
+			MaxRetries: 3,
+			Timeout:    60 * time.Second,
+		})
+
+		embedder := &embedAdapter{client: llmClient, model: req.Model}
+		strategy := content.NewCosineStrategy(embedder)
+		strategy.Threshold = req.Threshold
+		strategy.TopN = req.TopN
+
+		results, err := strategy.Extract(ctx, htmlContent, content.ExtractionConfig{})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cosine extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":     req.URL,
+			"results": results,
+		})
+	}
+}
+
+func pdfExtractHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req PDFExtractRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.Path == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+			return
+		}
+
+		processor := content.NewPDFProcessor(content.PDFProcessorConfig{
+			MaxPages: req.MaxPages,
+		})
+
+		text, err := processor.ExtractFromPath(req.Path)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "pdf extraction failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"path":    req.Path,
+			"content": text,
+			"length":  len(text),
+		})
+	}
+}
+
+func batchCrawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, rateLimiter *crawl.RateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req BatchCrawlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if len(req.URLs) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "urls is required"})
+			return
+		}
+		if req.MaxConcurrent <= 0 {
+			req.MaxConcurrent = cfg.MaxConcurrent
+		}
+		if req.TimeoutMs <= 0 {
+			req.TimeoutMs = cfg.RequestTimeoutMs
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Output == "" {
+			req.Output = "markdown"
+		}
+
+		batchTimeout := 10 * time.Minute
+		ctx, cancel := context.WithTimeout(r.Context(), batchTimeout)
+		defer cancel()
+
+		crawlFn := func(ctx context.Context, pageURL string) (*crawl.DeepCrawlResult, error) {
+			if err := rateLimiter.Wait(ctx, pageURL); err != nil {
+				return nil, err
+			}
+
+			crawlReq := CrawlRequest{
+				URL:            pageURL,
+				WaitMs:         req.WaitMs,
+				MaxScrollSteps: 10,
+				Output:         req.Output,
+				Prune:          req.Prune,
+			}
+			resp := crawlSinglePage(ctx, cfg, cdpClient, httpClient, pruner, crawlReq)
+
+			rateLimiter.RecordResult(pageURL, resp.StatusCode)
+
+			return &crawl.DeepCrawlResult{
+				URL:          resp.URL,
+				StatusCode:   resp.StatusCode,
+				Blocked:      resp.Blocked,
+				Content:      resp.Content,
+				Links:        resp.Links,
+				RenderTimeMs: resp.RenderTimeMs,
+			}, nil
+		}
+
+		retryCfg := crawl.DefaultRetryConfig()
+		if req.MaxRetries > 0 {
+			retryCfg.MaxRetries = req.MaxRetries
+		}
+
+		batchCfg := crawl.BatchConfig{
+			MaxConcurrent: req.MaxConcurrent,
+			Timeout:       time.Duration(req.TimeoutMs) * time.Millisecond,
+			RetryConfig:   retryCfg,
+		}
+
+		result := crawl.CrawlMany(ctx, req.URLs, crawlFn, batchCfg)
+
+		// Convert error map to string map for JSON serialisation.
+		errMap := make(map[string]string, len(result.Errors))
+		for u, e := range result.Errors {
+			errMap[u] = e.Error()
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"results": result.Results,
+			"errors":  errMap,
+			"stats":   result.Stats,
+		})
+	}
+}
+
+func deepCrawlStreamHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, robots *crawl.RobotsChecker, rateLimiter *crawl.RateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req DeepCrawlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.MaxDepth <= 0 {
+			req.MaxDepth = 3
+		}
+		if req.MaxPages <= 0 {
+			req.MaxPages = 100
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Output == "" {
+			req.Output = "markdown"
+		}
+
+		// Set SSE headers before any writing.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		deepTimeout := 10 * time.Minute
+		ctx, cancel := context.WithTimeout(r.Context(), deepTimeout)
+		defer cancel()
+
+		var filters *crawl.FilterChain
+		if req.Filters != nil {
+			filters = crawl.BuildFilterChain(req.Filters)
+		}
+
+		var scorer crawl.URLScorer
+		if req.Scorer != nil {
+			scorer = crawl.BuildScorer(req.Scorer)
+		}
+
+		crawlFn := func(ctx context.Context, pageURL string) (*crawl.DeepCrawlResult, error) {
+			if err := rateLimiter.Wait(ctx, pageURL); err != nil {
+				return nil, err
+			}
+
+			crawlReq := CrawlRequest{
+				URL:            pageURL,
+				WaitMs:         req.WaitMs,
+				Scroll:         req.Scroll,
+				MaxScrollSteps: 10,
+				Output:         req.Output,
+				Prune:          req.Prune,
+				Proxy:          true,
+			}
+			resp := crawlSinglePage(ctx, cfg, cdpClient, httpClient, pruner, crawlReq)
+
+			rateLimiter.RecordResult(pageURL, resp.StatusCode)
+
+			return &crawl.DeepCrawlResult{
+				URL:          resp.URL,
+				StatusCode:   resp.StatusCode,
+				Blocked:      resp.Blocked,
+				Content:      resp.Content,
+				Links:        resp.Links,
+				RenderTimeMs: resp.RenderTimeMs,
+			}, nil
+		}
+
+		opts := crawl.CrawlOptions{
+			MaxDepth:        req.MaxDepth,
+			MaxPages:        req.MaxPages,
+			IncludeExternal: req.IncludeExternal,
+			Filters:         filters,
+			Scorer:          scorer,
+			ScoreThreshold:  req.ScoreThreshold,
+			Robots:          robots,
+		}
+
+		streamFn := func(result crawl.DeepCrawlResult) bool {
+			data, err := json.Marshal(result)
+			if err != nil {
+				return true // skip bad result, keep going
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			return true
+		}
+
+		stats, err := crawl.StreamBFS(ctx, req.URL, crawlFn, opts, streamFn)
+
+		// Send a final stats event.
+		statsData, _ := json.Marshal(map[string]any{"stats": stats, "error": func() string {
+			if err != nil {
+				return err.Error()
+			}
+			return ""
+		}()})
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", statsData)
+		flusher.Flush()
+	}
+}
+
+func filterHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter, proxyPool *proxy.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
+
+		var req FilterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+			return
+		}
+		if req.WaitMs <= 0 {
+			req.WaitMs = cfg.DefaultWaitMs
+		}
+		if req.Provider == "" {
+			req.Provider = cfg.LLMProvider
+		}
+		if req.Model == "" {
+			req.Model = cfg.LLMModel
+		}
+		if req.APIKey == "" {
+			req.APIKey = cfg.LLMAPIKey
+		}
+		if len(req.Filters) == 0 {
+			req.Filters = []string{"bm25"}
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		proxyURL := proxyURLFromPool(proxyPool, req.Proxy)
+
+		htmlContent, _, _, err := browser.RenderPage(ctx, cdpClient, httpClient, req.URL, req.WaitMs, false, 0, proxyURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "render failed: " + err.Error()})
+			return
+		}
+
+		if req.Proxy {
+			if pruned, err := pruner.Filter(htmlContent); err == nil && len(pruned) > 0 {
+				htmlContent = pruned
+			}
+		}
+
+		blocks := content.ExtractTextChunks(htmlContent)
+		blockTexts := make([]string, len(blocks))
+		for i, b := range blocks {
+			blockTexts[i] = b.Text
+		}
+
+		var contentFilters []content.ContentFilter
+		for _, name := range req.Filters {
+			switch name {
+			case "bm25":
+				contentFilters = append(contentFilters, content.NewBM25ContentFilter())
+			case "pruning":
+				contentFilters = append(contentFilters, content.NewPruningContentFilter())
+			case "llm":
+				llmClient := llm.NewClient(llm.Config{
+					Provider:   req.Provider,
+					Model:      req.Model,
+					APIKey:     req.APIKey,
+					MaxTokens:  4096,
+					MaxRetries: 3,
+					Timeout:    60 * time.Second,
+				})
+				adapter := &llmAdapter{client: llmClient}
+				contentFilters = append(contentFilters, content.NewLLMContentFilter(adapter))
+			}
+		}
+
+		pipeline := content.NewFilterPipeline(contentFilters...)
+		filtered, err := pipeline.Run(ctx, blockTexts, req.Query)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "filter failed: " + err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"url":           req.URL,
+			"query":         req.Query,
+			"total_blocks":  len(blockTexts),
+			"filters_used":  req.Filters,
+			"results":       filtered,
 		})
 	}
 }
