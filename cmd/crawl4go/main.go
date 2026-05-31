@@ -25,6 +25,21 @@ type Config struct {
 	DefaultWaitMs    int
 	MaxConcurrent    int
 	RequestTimeoutMs int
+
+	// LLM provider configuration. When LLMProvider is empty (or no API key is
+	// set for openai/anthropic), LLM-backed features are disabled.
+	LLMProvider   string
+	LLMModel      string
+	LLMAPIKey     string
+	LLMBaseURL    string
+	LLMEmbedModel string
+
+	// Persistent crawl-result cache (dependency-free filesystem cache).
+	// Disabled unless CacheEnabled. CachePath is a directory; CacheTTLSeconds
+	// of 0 means entries never expire.
+	CacheEnabled    bool
+	CachePath       string
+	CacheTTLSeconds int
 }
 
 func loadConfig() Config {
@@ -35,6 +50,16 @@ func loadConfig() Config {
 		DefaultWaitMs:    getEnvInt("DEFAULT_WAIT_MS", 1500),
 		MaxConcurrent:    getEnvInt("MAX_CONCURRENT", 4),
 		RequestTimeoutMs: getEnvInt("REQUEST_TIMEOUT_MS", 30000),
+
+		LLMProvider:   getEnv("LLM_PROVIDER", ""),
+		LLMModel:      getEnv("LLM_MODEL", ""),
+		LLMAPIKey:     getEnv("LLM_API_KEY", ""),
+		LLMBaseURL:    getEnv("LLM_BASE_URL", ""),
+		LLMEmbedModel: getEnv("LLM_EMBED_MODEL", ""),
+
+		CacheEnabled:    getEnv("CACHE_ENABLED", "") == "true",
+		CachePath:       getEnv("CACHE_PATH", ""),
+		CacheTTLSeconds: getEnvInt("CACHE_TTL_SECONDS", 0),
 	}
 }
 
@@ -193,6 +218,13 @@ func main() {
 	robots := crawl.NewRobotsChecker()
 	rateLimiter := crawl.NewRateLimiter()
 
+	// Shared dependency bundle for handlers. Optional subsystems (LLM, cache)
+	// are nil-safe; see deps.go. New feature handlers receive deps.
+	deps := buildDeps(cfg, cdpClient, httpClient, pruner, robots, rateLimiter)
+	if deps.Cache != nil {
+		defer deps.Cache.Close()
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/crawl", crawlHandler(cfg, cdpClient, httpClient, pruner))
@@ -212,7 +244,7 @@ func main() {
 	mux.HandleFunc("/robots", robotsHandler(robots))
 	mux.HandleFunc("/analyze", analyzeHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/perf", perfHandler(cfg, cdpClient))
-	mux.HandleFunc("/health", healthHandler(cdpClient))
+	mux.HandleFunc("/health", healthHandler(cdpClient, deps))
 
 	slog.Info("crawl4go starting",
 		"port", cfg.Port,
@@ -801,7 +833,7 @@ func robotsHandler(robots *crawl.RobotsChecker) http.HandlerFunc {
 	}
 }
 
-func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
+func healthHandler(cdpClient *browser.CDPClient, deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -809,6 +841,8 @@ func healthHandler(cdpClient *browser.CDPClient) http.HandlerFunc {
 		status := map[string]any{
 			"status":   "ok",
 			"zenpanda": cdpClient.Healthy(ctx),
+			"llm":      deps.LLMEnabled(),
+			"cache":    deps.CacheEnabled(),
 		}
 		writeJSON(w, http.StatusOK, status)
 	}
