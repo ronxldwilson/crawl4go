@@ -73,7 +73,7 @@ curl http://localhost:8082/health
 
 ## API Reference
 
-crawl4go exposes **24 endpoints** spanning crawling, extraction, content processing, LLM-backed extraction/filtering, batch & streaming crawls, and infrastructure.
+crawl4go exposes **25 endpoints** spanning crawling, extraction, content processing, LLM-backed extraction/filtering, batch & streaming crawls, PDF text extraction, and infrastructure.
 
 > **LLM-backed endpoints** (`/extract-llm`, `/extract-cosine`, `/llm-filter`, `/crawl-fit`) require an LLM provider to be configured (see [Configuration](#configuration)). When none is set they return HTTP `503`. All other endpoints are pure-algorithmic and need no external services.
 
@@ -780,6 +780,26 @@ curl -X POST http://localhost:8082/crawl-fit \
 ```
 
 Response: `{ "url", "fit_markdown", "kept_blocks", "total_blocks" }`.
+
+---
+
+### POST `/extract-pdf`
+
+Fetch a PDF by URL and extract its text. Uses a dependency-free extractor (FlateDecode stream decompression with an ASCII-run fallback) — no external tools required. Optionally routes the fetch through the Tor proxy.
+
+```bash
+curl -X POST http://localhost:8082/extract-pdf \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/doc.pdf", "max_pages": 20, "proxy": false}'
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | **required** | PDF URL to fetch |
+| `max_pages` | int | `0` (all) | Limit the number of content streams processed |
+| `proxy` | bool | `false` | Route the fetch through the Tor proxy |
+
+Response: `{ "url", "text", "chars" }`. Returns `422` when the fetched content is not a valid PDF.
 
 ---
 

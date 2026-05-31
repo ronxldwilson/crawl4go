@@ -252,6 +252,7 @@ func main() {
 	registerLLMExtractRoutes(mux, deps) // /extract-llm, /extract-cosine
 	registerLLMFilterRoutes(mux, deps)  // /llm-filter, /crawl-fit
 	registerBatchRoutes(mux, deps)      // /crawl-many, /crawl-stream
+	registerPDFRoutes(mux, deps)        // /extract-pdf
 
 	slog.Info("crawl4go starting",
 		"port", cfg.Port,

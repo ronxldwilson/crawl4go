@@ -49,7 +49,12 @@ func (p *PDFProcessor) ExtractFromPath(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pdf: read file: %w", err)
 	}
+	return p.ExtractFromBytes(data)
+}
 
+// ExtractFromBytes extracts text from in-memory PDF bytes (e.g. an HTTP
+// response body), applying the same logic as ExtractFromPath.
+func (p *PDFProcessor) ExtractFromBytes(data []byte) (string, error) {
 	if len(data) < 5 || string(data[:5]) != "%PDF-" {
 		return "", fmt.Errorf("pdf: not a valid PDF file")
 	}
