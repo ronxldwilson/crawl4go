@@ -73,7 +73,9 @@ curl http://localhost:8082/health
 
 ## API Reference
 
-crawl4go exposes **17 endpoints** spanning crawling, extraction, content processing, and infrastructure.
+crawl4go exposes **24 endpoints** spanning crawling, extraction, content processing, LLM-backed extraction/filtering, batch & streaming crawls, and infrastructure.
+
+> **LLM-backed endpoints** (`/extract-llm`, `/extract-cosine`, `/llm-filter`, `/crawl-fit`) require an LLM provider to be configured (see [Configuration](#configuration)). When none is set they return HTTP `503`. All other endpoints are pure-algorithmic and need no external services.
 
 ---
 
@@ -701,6 +703,86 @@ curl http://localhost:8082/health
 
 ---
 
+### POST `/crawl-many`
+
+Crawl many URLs concurrently in a single request, with per-domain rate limiting and a configurable concurrency cap. Results are returned together once all URLs complete.
+
+```bash
+curl -X POST http://localhost:8082/crawl-many \
+  -H "Content-Type: application/json" \
+  -d '{"urls": ["https://a.com", "https://b.com"], "max_concurrent": 4, "output": "markdown", "prune": true}'
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `urls` | []string | **required** | URLs to crawl |
+| `max_concurrent` | int | `MAX_CONCURRENT` | Maximum parallel crawls |
+| `wait_ms` / `scroll` / `output` / `prune` / `proxy` | — | — | Same semantics as `/crawl`, applied to every URL |
+
+Response: `{ "results": [ <CrawlResponse>... ], "stats": { "total", "ok", "blocked", "elapsed_ms" } }`.
+
+---
+
+### POST `/crawl-stream`
+
+Same inputs as `/crawl-many`, but streams results as **Server-Sent Events** (`text/event-stream`): one `data:` event per completed URL, followed by a final `event: done` carrying the aggregate stats. Useful for showing partial results as they arrive.
+
+---
+
+### POST `/extract-llm`
+
+LLM-driven extraction. Renders the page, chunks it, and asks the configured LLM to extract structured content (optionally conforming to a JSON `schema`). **Requires an LLM provider.**
+
+```bash
+curl -X POST http://localhost:8082/extract-llm \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "schema": "{\"title\":\"string\"}", "chunk_size": 4000, "overlap": 200}'
+```
+
+Response: `{ "url", "results": [...], "input_tokens", "output_tokens" }`.
+
+---
+
+### POST `/extract-cosine`
+
+Embedding-based extraction: embeds the page's text blocks, clusters them by cosine similarity, and returns the top-N most coherent clusters. **Requires an LLM provider** (for embeddings).
+
+```bash
+curl -X POST http://localhost:8082/extract-cosine \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "threshold": 0.6, "top_n": 5}'
+```
+
+---
+
+### POST `/llm-filter`
+
+Filters a page's content blocks by relevance to a `query` using the LLM, returning only the blocks the model judges relevant (as cleaned markdown). **Requires an LLM provider.**
+
+```bash
+curl -X POST http://localhost:8082/llm-filter \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "query": "pricing and plans", "prune": true}'
+```
+
+Response: `{ "url", "query", "total_blocks", "kept", "blocks": [ <FilteredBlock>... ] }`.
+
+---
+
+### POST `/crawl-fit`
+
+Produces **"fit markdown"** — renders the page, runs the LLM relevance filter against a `query`, and joins the kept blocks into a single focused markdown document. **Requires an LLM provider.**
+
+```bash
+curl -X POST http://localhost:8082/crawl-fit \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "query": "installation instructions"}'
+```
+
+Response: `{ "url", "fit_markdown", "kept_blocks", "total_blocks" }`.
+
+---
+
 ## Deep Crawl Strategies
 
 crawl4go ships with four traversal strategies, selectable via the `strategy` field:
@@ -839,6 +921,16 @@ All configuration is via environment variables:
 | `DEFAULT_WAIT_MS` | `1500` | Default page render wait time (ms) |
 | `MAX_CONCURRENT` | `4` | Maximum concurrent CDP sessions |
 | `REQUEST_TIMEOUT_MS` | `30000` | Overall request timeout (ms) |
+| `LLM_PROVIDER` | _(unset)_ | LLM provider: `openai`, `anthropic`, or `ollama`. Enables LLM-backed endpoints. |
+| `LLM_MODEL` | provider default | Model name (e.g. `gpt-4o-mini`, `claude-...`) |
+| `LLM_API_KEY` | _(unset)_ | API key (required for `openai`/`anthropic`; not needed for `ollama`) |
+| `LLM_BASE_URL` | provider default | Override the provider base URL (e.g. self-hosted/OpenAI-compatible) |
+| `LLM_EMBED_MODEL` | `text-embedding-3-small` | Embedding model for `/extract-cosine` |
+| `CACHE_ENABLED` | `false` | Set to `true` to enable the persistent response cache |
+| `CACHE_PATH` | _(unset)_ | Directory for the filesystem cache (required when caching is enabled) |
+| `CACHE_TTL_SECONDS` | `0` | Cache entry TTL in seconds; `0` = never expire |
+
+When `LLM_PROVIDER` is unset (or no API key is supplied for `openai`/`anthropic`), the four LLM-backed endpoints return `503` and every other endpoint works unchanged. The response cache is dependency-free (a small filesystem store) and transparent: `/crawl` and `/crawl-many` consult it automatically, and any request may set `"no_cache": true` to bypass it. `GET /health` reports `llm` and `cache` capability flags.
 
 ## Docker
 
@@ -889,7 +981,7 @@ crawl4go has only 4 external Go module dependencies:
 | [`html-to-markdown/v2`](https://github.com/JohannesKaufmann/html-to-markdown) | HTML-to-Markdown conversion |
 | [`snowball`](https://github.com/kljensen/snowball) | Snowball stemming for BM25 scoring |
 
-## Part of the TipStat Sourcer Stack
+## Part of the SingleLeaf Search Stack
 
 crawl4go runs as a sidecar in the SingleLeaf search stack, handling all page rendering and content extraction for deep-search results:
 

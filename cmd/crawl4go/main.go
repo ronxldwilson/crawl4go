@@ -92,22 +92,23 @@ type CrawlRequest struct {
 	ExtractMeta    bool   `json:"extract_meta"`
 	ExtractTables  bool   `json:"extract_tables"`
 	ExtractMedia   bool   `json:"extract_media"`
+	NoCache        bool   `json:"no_cache"` // bypass the response cache for this request
 }
 
 type CrawlResponse struct {
-	URL          string                   `json:"url"`
-	StatusCode   int                      `json:"status_code"`
-	Blocked      bool                     `json:"blocked"`
-	BlockReason  string                   `json:"block_reason,omitempty"`
-	Content      string                   `json:"content"`
-	Links        content.LinkSet          `json:"links"`
-	Metadata     *content.PageMetadata    `json:"metadata,omitempty"`
-	Tables       []content.ExtractedTable `json:"tables,omitempty"`
-	Media        *content.MediaSet        `json:"media,omitempty"`
+	URL          string                    `json:"url"`
+	StatusCode   int                       `json:"status_code"`
+	Blocked      bool                      `json:"blocked"`
+	BlockReason  string                    `json:"block_reason,omitempty"`
+	Content      string                    `json:"content"`
+	Links        content.LinkSet           `json:"links"`
+	Metadata     *content.PageMetadata     `json:"metadata,omitempty"`
+	Tables       []content.ExtractedTable  `json:"tables,omitempty"`
+	Media        *content.MediaSet         `json:"media,omitempty"`
 	Readability  *content.ReadabilityScore `json:"readability,omitempty"`
-	ContentHash  string                   `json:"content_hash,omitempty"`
-	RenderTimeMs int64                    `json:"render_time_ms"`
-	RenderSource string                   `json:"render_source"`
+	ContentHash  string                    `json:"content_hash,omitempty"`
+	RenderTimeMs int64                     `json:"render_time_ms"`
+	RenderSource string                    `json:"render_source"`
 }
 
 type DeepCrawlRequest struct {
@@ -132,15 +133,15 @@ type DeepCrawlResponse struct {
 }
 
 type ExtractRequest struct {
-	URL    string                  `json:"url"`
+	URL    string                   `json:"url"`
 	Schema content.ExtractionSchema `json:"schema"`
-	WaitMs int                     `json:"wait_ms"`
-	Proxy  bool                    `json:"proxy"`
+	WaitMs int                      `json:"wait_ms"`
+	Proxy  bool                     `json:"proxy"`
 }
 
 type LinkPreviewRequest struct {
-	URLs           []string `json:"urls"`
-	MaxConcurrent  int      `json:"max_concurrent"`
+	URLs          []string `json:"urls"`
+	MaxConcurrent int      `json:"max_concurrent"`
 }
 
 type SitemapRequest struct {
@@ -149,13 +150,13 @@ type SitemapRequest struct {
 }
 
 type ChunkRequest struct {
-	URL      string `json:"url"`
-	Strategy string `json:"strategy"`
-	ChunkSize int   `json:"chunk_size"`
-	Overlap   int   `json:"overlap"`
-	WaitMs    int   `json:"wait_ms"`
-	Prune     bool  `json:"prune"`
-	Proxy     bool  `json:"proxy"`
+	URL       string `json:"url"`
+	Strategy  string `json:"strategy"`
+	ChunkSize int    `json:"chunk_size"`
+	Overlap   int    `json:"overlap"`
+	WaitMs    int    `json:"wait_ms"`
+	Prune     bool   `json:"prune"`
+	Proxy     bool   `json:"proxy"`
 }
 
 type ScreenshotRequest struct {
@@ -165,17 +166,17 @@ type ScreenshotRequest struct {
 }
 
 type XPathExtractRequest struct {
-	URL    string                      `json:"url"`
+	URL    string                        `json:"url"`
 	Schema content.XPathExtractionSchema `json:"schema"`
-	WaitMs int                         `json:"wait_ms"`
-	Proxy  bool                        `json:"proxy"`
+	WaitMs int                           `json:"wait_ms"`
+	Proxy  bool                          `json:"proxy"`
 }
 
 type RegexExtractRequest struct {
-	URL    string                      `json:"url"`
+	URL    string                        `json:"url"`
 	Schema content.RegexExtractionSchema `json:"schema"`
-	WaitMs int                         `json:"wait_ms"`
-	Proxy  bool                        `json:"proxy"`
+	WaitMs int                           `json:"wait_ms"`
+	Proxy  bool                          `json:"proxy"`
 }
 
 type JSExecuteRequest struct {
@@ -227,7 +228,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/crawl", crawlHandler(cfg, cdpClient, httpClient, pruner))
+	mux.HandleFunc("/crawl", crawlHandler(deps))
 	mux.HandleFunc("/deep-crawl", deepCrawlHandler(cfg, cdpClient, httpClient, pruner, robots, rateLimiter))
 	mux.HandleFunc("/extract", extractHandler(cfg, cdpClient, httpClient))
 	mux.HandleFunc("/link-preview", linkPreviewHandler(httpClient))
@@ -245,6 +246,12 @@ func main() {
 	mux.HandleFunc("/analyze", analyzeHandler(cfg, cdpClient, httpClient, pruner))
 	mux.HandleFunc("/perf", perfHandler(cfg, cdpClient))
 	mux.HandleFunc("/health", healthHandler(cdpClient, deps))
+
+	// Ported feature endpoints (see deps.go). LLM-backed routes return 503
+	// when no provider is configured; batch routes are always available.
+	registerLLMExtractRoutes(mux, deps) // /extract-llm, /extract-cosine
+	registerLLMFilterRoutes(mux, deps)  // /llm-filter, /crawl-fit
+	registerBatchRoutes(mux, deps)      // /crawl-many, /crawl-stream
 
 	slog.Info("crawl4go starting",
 		"port", cfg.Port,
@@ -279,7 +286,7 @@ func main() {
 
 // --- Handlers ---
 
-func crawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Client, pruner *content.PruningFilter) http.HandlerFunc {
+func crawlHandler(deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -296,7 +303,7 @@ func crawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Cli
 			return
 		}
 		if req.WaitMs <= 0 {
-			req.WaitMs = cfg.DefaultWaitMs
+			req.WaitMs = deps.Cfg.DefaultWaitMs
 		}
 		if req.MaxScrollSteps <= 0 {
 			req.MaxScrollSteps = 10
@@ -305,10 +312,10 @@ func crawlHandler(cfg Config, cdpClient *browser.CDPClient, httpClient *http.Cli
 			req.Output = "markdown"
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(deps.Cfg.RequestTimeoutMs)*time.Millisecond)
 		defer cancel()
 
-		resp := crawlSinglePage(ctx, cfg, cdpClient, httpClient, pruner, req)
+		resp := crawlSinglePageCached(ctx, deps, req)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

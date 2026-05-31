@@ -42,46 +42,32 @@ func (d *Deps) CacheEnabled() bool { return d != nil && d.Cache != nil }
 
 // --- LLM adapter ---------------------------------------------------------
 
-// LLMAdapter wraps *llm.Client and exposes the small method set the content
-// strategies depend on. A single value satisfies all three content interfaces.
+// LLMAdapter exposes the small method set the content strategies depend on,
+// backed by injectable function fields. A single value satisfies all three
+// content interfaces (LLMProvider, LLMCompleter, Embedder). The func-field
+// design lets tests construct an adapter with fakes, while production wires it
+// to an *llm.Client via buildLLMAdapter.
 type LLMAdapter struct {
-	Client *llm.Client
-	// EmbedModel overrides the default embedding model when non-empty.
-	EmbedModel string
+	completer func(ctx context.Context, prompt string) (string, error)
+	embedder  func(ctx context.Context, text string) ([]float64, error)
 }
 
 // Compile-time guarantees that the adapter satisfies every interface the
 // previously-dead content strategies require.
 var (
-	_ content.LLMProvider = (*LLMAdapter)(nil)
+	_ content.LLMProvider  = (*LLMAdapter)(nil)
 	_ content.LLMCompleter = (*LLMAdapter)(nil)
 	_ content.Embedder     = (*LLMAdapter)(nil)
 )
 
 // Complete satisfies content.LLMProvider and content.LLMCompleter.
 func (a *LLMAdapter) Complete(ctx context.Context, prompt string) (string, error) {
-	resp, err := a.Client.Complete(ctx, llm.CompletionRequest{
-		Messages: []llm.Message{{Role: "user", Content: prompt}},
-	})
-	if err != nil {
-		return "", err
-	}
-	return resp.Content, nil
+	return a.completer(ctx, prompt)
 }
 
 // Embed satisfies content.Embedder.
 func (a *LLMAdapter) Embed(ctx context.Context, text string) ([]float64, error) {
-	resp, err := a.Client.Embed(ctx, llm.EmbeddingRequest{
-		Input: []string{text},
-		Model: a.EmbedModel,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(resp.Embeddings) == 0 {
-		return nil, nil
-	}
-	return resp.Embeddings[0], nil
+	return a.embedder(ctx, text)
 }
 
 // --- builders ------------------------------------------------------------
@@ -122,10 +108,33 @@ func buildLLMAdapter(cfg Config) *LLMAdapter {
 	lc.APIKey = cfg.LLMAPIKey
 	lc.BaseURL = cfg.LLMBaseURL
 
+	client := llm.NewClient(lc)
+	embedModel := cfg.LLMEmbedModel
+
 	slog.Info("llm enabled", "provider", lc.Provider, "model", lc.Model)
 	return &LLMAdapter{
-		Client:     llm.NewClient(lc),
-		EmbedModel: cfg.LLMEmbedModel,
+		completer: func(ctx context.Context, prompt string) (string, error) {
+			resp, err := client.Complete(ctx, llm.CompletionRequest{
+				Messages: []llm.Message{{Role: "user", Content: prompt}},
+			})
+			if err != nil {
+				return "", err
+			}
+			return resp.Content, nil
+		},
+		embedder: func(ctx context.Context, text string) ([]float64, error) {
+			resp, err := client.Embed(ctx, llm.EmbeddingRequest{
+				Input: []string{text},
+				Model: embedModel,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if len(resp.Embeddings) == 0 {
+				return nil, nil
+			}
+			return resp.Embeddings[0], nil
+		},
 	}
 }
 
